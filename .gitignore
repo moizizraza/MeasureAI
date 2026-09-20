@@ -1,0 +1,9 @@
+# Python / Server certs
+__pycache__/
+*.pyc
+server.key
+server.pem
+
+# OS generated files
+.DS_Store
+Thumbs.db
