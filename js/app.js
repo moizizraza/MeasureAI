@@ -13,6 +13,9 @@
     fps: 0, fpsTs: 0,
     filterMode: 'all',        // 'all' or 'custom'
     selectedObjects: new Set(),  // classes selected in custom mode
+    mode: 'detect',           // 'detect' or 'tape'
+    tape: { pA: null, pB: null, distMm: 0 },
+    guide: { active: false, box: null },
   };
 
   /* ── DOM helpers ── */
@@ -42,12 +45,31 @@
     const info  = MeasureEngine.getCalibrationInfo();
     const badge = $('calib-badge');
     const txt   = $('calib-txt');
-    if (info.calibrated) {
+    if (info.isLocked) {
+      badge.className = 'calib-badge calibrated';
+      txt.textContent = `100% Calibrated ✓ · ${info.pxPerMm.toFixed(1)} px/mm`;
+    } else if (info.calibrated) {
       badge.className = 'calib-badge calibrated';
       txt.textContent = `Scale calibrated · ${info.sampleCount} samples`;
     } else {
       badge.className = 'calib-badge';
-      txt.textContent = 'Calibrating…';
+      txt.textContent = 'Calibrating… (Tap to lock)';
+    }
+
+    // Update calibration drawer status if open
+    const cscTitle = $('calib-status-title');
+    const cscDesc  = $('calib-status-desc');
+    if (cscTitle && cscDesc) {
+      if (info.isLocked) {
+        cscTitle.textContent = '100% Locked Precision Scale';
+        cscDesc.textContent = `Scale: ${info.pxPerMm.toFixed(2)} px/mm · Multiplier: ${info.scaleMultiplier.toFixed(2)}x`;
+      } else if (info.calibrated) {
+        cscTitle.textContent = `Auto-AI Scale (${info.sampleCount} samples)`;
+        cscDesc.textContent = `Scale: ${info.pxPerMm.toFixed(2)} px/mm · Multiplier: ${info.scaleMultiplier.toFixed(2)}x`;
+      } else {
+        cscTitle.textContent = 'Auto-AI Calibrating…';
+        cscDesc.textContent = `Align card or hold objects in view`;
+      }
     }
   }
 
@@ -141,10 +163,16 @@
       };
     });
 
-    S.lastMeasurements = items;
+    // Update tape distance if points exist
+    if (S.tape.pA && S.tape.pB) {
+      const dx = S.tape.pB.x - S.tape.pA.x;
+      const dy = S.tape.pB.y - S.tape.pA.y;
+      const pixelDist = Math.sqrt(dx * dx + dy * dy);
+      S.tape.distMm = MeasureEngine.pxToMm(pixelDist);
+    }
 
-    // Draw (renderer handles dim vs bright based on .selected)
-    Renderer.draw(items, S.unit);
+    // Draw (renderer handles dim vs bright, tape measure, and guide box)
+    Renderer.draw(items, S.unit, S.tape, S.guide);
 
     // Update results strip (only show cards for selected objects)
     const measured = items.filter(m => m.selected);
@@ -153,7 +181,15 @@
     // Status
     const selCount = measured.length;
     const totCount = filtered.length;
-    if (totCount > 0) {
+    if (S.mode === 'tape') {
+      if (S.tape.pA && S.tape.pB) {
+        setStatus(`Tape: ${MeasureEngine.format(S.tape.distMm, S.unit)} · Tap to place new Point A`, 'live');
+      } else if (S.tape.pA) {
+        setStatus(`Point A set · Tap Point B to measure`, 'live');
+      } else {
+        setStatus(`Tape Tool: Tap any 2 points on screen`, 'live');
+      }
+    } else if (totCount > 0) {
       if (selCount > 0) {
         setStatus(`Measuring ${selCount} of ${totCount} objects`, 'live');
       } else {
@@ -183,6 +219,42 @@
       py = e.clientY - rect.top;
     }
 
+    // 1. If card guide is active, tap to lock precision scale!
+    if (S.guide.active && S.guide.box) {
+      const b = S.guide.box;
+      if (px >= b.x - 20 && px <= b.x + b.w + 20 && py >= b.y - 20 && py <= b.y + b.h + 20) {
+        // Standard credit card: 85.60 mm wide
+        const pxPerMm = b.w / 85.60;
+        MeasureEngine.setManualScale(pxPerMm);
+        S.guide.active = false;
+        $('btn-show-card-guide').classList.remove('active');
+        $('btn-calib').classList.add('active');
+        updateCalibBadge();
+        toast(`🎯 100% Precision Scale Locked! (${pxPerMm.toFixed(1)} px/mm)`, 's', 3500);
+        return;
+      }
+    }
+
+    // 2. If Virtual Tape Measure mode is active:
+    if (S.mode === 'tape') {
+      if (!S.tape.pA || (S.tape.pA && S.tape.pB)) {
+        S.tape.pA = { x: px, y: py };
+        S.tape.pB = null;
+        S.tape.distMm = 0;
+        toast('📍 Point A placed. Now tap Point B.', '', 2000);
+      } else {
+        S.tape.pB = { x: px, y: py };
+        const dx = S.tape.pB.x - S.tape.pA.x;
+        const dy = S.tape.pB.y - S.tape.pA.y;
+        const pixelDist = Math.sqrt(dx * dx + dy * dy);
+        S.tape.distMm = MeasureEngine.pxToMm(pixelDist);
+        const distStr = MeasureEngine.format(S.tape.distMm, S.unit);
+        toast(`📏 Distance: ${distStr}`, 's', 3000);
+      }
+      return;
+    }
+
+    // 3. Object selection mode (Tap object to measure/deselect)
     const hit = Renderer.hitTest(S.lastMeasurements, px, py);
     if (hit) {
       if (selectedForMeasure.has(hit.label)) {
@@ -459,8 +531,116 @@
     $('history-drawer').classList.add('hidden');
     $('filter-drawer').classList.add('hidden');
     $('tips-drawer').classList.add('hidden');
+    const cd = $('calib-drawer');
+    if (cd) cd.classList.add('hidden');
     $('backdrop').classList.add('hidden');
   }
+
+  /* ═══════════════════════════════════
+     PRECISION CALIBRATION DRAWER
+  ═══════════════════════════════════ */
+  function openCalibDrawer() {
+    closeAllDrawers();
+    updateCalibBadge();
+    $('calib-drawer').classList.remove('hidden');
+    $('backdrop').classList.remove('hidden');
+  }
+
+  $('btn-calib').addEventListener('click', openCalibDrawer);
+  $('calib-badge').addEventListener('click', openCalibDrawer);
+  $('btn-calib-close').addEventListener('click', closeAllDrawers);
+
+  // Toggle card guide on camera
+  $('btn-show-card-guide').addEventListener('click', () => {
+    S.guide.active = !S.guide.active;
+    $('btn-show-card-guide').classList.toggle('active', S.guide.active);
+    closeAllDrawers();
+    if (S.guide.active) {
+      toast('Hold credit card inside yellow box, then tap the box to lock!', 'w', 4000);
+    }
+  });
+
+  // Fine-tune scale slider
+  const slider = $('scale-slider');
+  const sliderLabel = $('slider-val-label');
+  slider.addEventListener('input', () => {
+    const val = parseInt(slider.value, 10);
+    const mult = val / 100;
+    MeasureEngine.setScaleMultiplier(mult);
+    sliderLabel.textContent = `${mult.toFixed(2)}x`;
+    updateCalibBadge();
+  });
+
+  $('btn-mult-minus').addEventListener('click', () => {
+    slider.value = Math.max(70, parseInt(slider.value, 10) - 1);
+    slider.dispatchEvent(new Event('input'));
+  });
+
+  $('btn-mult-plus').addEventListener('click', () => {
+    slider.value = Math.min(130, parseInt(slider.value, 10) + 1);
+    slider.dispatchEvent(new Event('input'));
+  });
+
+  // Reference presets
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const ref = btn.dataset.ref;
+      let targetMm = 85.60;
+      let name = 'Credit Card';
+      if (ref === 'phone') { targetMm = 147.0; name = 'Smartphone'; }
+      else if (ref === 'a4') { targetMm = 297.0; name = 'A4 Paper'; }
+
+      // Look for any detected object matching this reference
+      const found = S.lastMeasurements.find(m => {
+        if (ref === 'card') return m.label === 'book' || m.label === 'credit card';
+        if (ref === 'phone') return m.label === 'cell phone' || m.label === 'remote';
+        if (ref === 'a4') return m.label === 'book';
+        return false;
+      });
+
+      if (found) {
+        const [, , w] = found.bbox;
+        const pxPerMm = (w * 0.95) / targetMm;
+        MeasureEngine.setManualScale(pxPerMm);
+        updateCalibBadge();
+        toast(`🎯 Scale locked to detected ${name} (${targetMm}mm)!`, 's', 3000);
+      } else {
+        toast(`Place ${name} flat in camera frame, then tap preset again!`, 'w', 3000);
+      }
+    });
+  });
+
+  // Reset scale
+  $('btn-calib-reset').addEventListener('click', () => {
+    MeasureEngine.reset();
+    slider.value = 100;
+    sliderLabel.textContent = '1.00x';
+    S.guide.active = false;
+    $('btn-show-card-guide').classList.remove('active');
+    $('btn-calib').classList.remove('active');
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    updateCalibBadge();
+    toast('Scale reset to Auto-AI', '', 1500);
+  });
+
+  /* ═══════════════════════════════════
+     VIRTUAL TAPE MEASURE TOOL
+  ═══════════════════════════════════ */
+  $('btn-tape').addEventListener('click', () => {
+    if (S.mode === 'tape') {
+      S.mode = 'detect';
+      S.tape = { pA: null, pB: null, distMm: 0 };
+      $('btn-tape').classList.remove('active');
+      toast('Tape Tool off (Detection mode active)', '', 1500);
+    } else {
+      S.mode = 'tape';
+      S.tape = { pA: null, pB: null, distMm: 0 };
+      $('btn-tape').classList.add('active');
+      toast('📏 Tape Tool Active: Tap any 2 points on screen to measure!', 's', 3000);
+    }
+  });
 
 
   /* ═══════════════════════════════════

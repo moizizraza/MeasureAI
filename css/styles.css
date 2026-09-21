@@ -372,6 +372,100 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;}
 }
 .tip-body b{color:var(--a);font-weight:700;}
 
+/* ═══ CALIBRATION DRAWER ═══ */
+.calib-badge{cursor:pointer;transition:var(--t);}
+.calib-badge:hover{border-color:var(--p);transform:scale(1.03);}
+.calib-scroll{
+  overflow-y:auto;max-height:58vh;display:flex;flex-direction:column;
+  padding-bottom:20px;
+}
+.calib-status-card{
+  display:flex;align-items:center;gap:12px;
+  background:rgba(124,110,255,.08);border:1px solid rgba(124,110,255,.25);
+  border-radius:var(--r2);padding:12px 14px;margin-bottom:14px;
+}
+.csc-icon{
+  width:36px;height:36px;border-radius:50%;flex-shrink:0;
+  background:rgba(124,110,255,.15);color:var(--p);font-size:1.1rem;
+  display:flex;align-items:center;justify-content:center;
+}
+.csc-title{font-size:.85rem;font-weight:700;color:var(--txt);margin-bottom:2px;}
+.csc-desc{font-family:var(--mono);font-size:.72rem;color:var(--a);font-weight:600;}
+
+.calib-sec-title{
+  font-family:var(--disp);font-size:.75rem;font-weight:700;
+  text-transform:uppercase;letter-spacing:.06em;color:var(--txt2);margin-bottom:4px;
+}
+.calib-hint{
+  font-size:.72rem;color:var(--txt3);line-height:1.45;margin-bottom:10px;
+}
+
+.calib-action-btn{
+  width:100%;padding:11px 16px;border-radius:var(--r2);
+  background:rgba(251,191,36,.12);border:1.5px solid rgba(251,191,36,.35);
+  color:var(--w);font-size:.82rem;font-weight:700;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:var(--t);cursor:pointer;
+}
+.calib-action-btn:hover{
+  background:rgba(251,191,36,.2);border-color:var(--w);transform:translateY(-1px);
+}
+.calib-action-btn.active{
+  background:var(--w);color:#06080f;border-color:var(--w);
+}
+
+.slider-row{
+  display:flex;align-items:center;gap:10px;margin-bottom:8px;
+}
+.slider-nudge-btn{
+  width:34px;height:34px;border-radius:var(--r1);
+  background:var(--surf2);border:1px solid var(--bdr2);
+  color:var(--txt);font-size:1.1rem;font-weight:700;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:var(--t);flex-shrink:0;
+}
+.slider-nudge-btn:hover{background:var(--surf3);border-color:var(--p);color:var(--p);}
+.slider-wrap{flex:1;display:flex;flex-direction:column;gap:4px;}
+#scale-slider{
+  width:100%;accent-color:var(--a);cursor:pointer;
+}
+.slider-labels{
+  display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:.65rem;color:var(--txt3);
+}
+#slider-val-label{color:var(--a);font-weight:700;}
+
+.preset-buttons{
+  display:flex;gap:6px;flex-wrap:wrap;
+}
+.preset-btn{
+  flex:1;min-width:100px;padding:8px 10px;border-radius:var(--r1);
+  background:var(--surf);border:1px solid var(--bdr);
+  color:var(--txt2);font-size:.72rem;font-weight:600;
+  transition:var(--t);cursor:pointer;text-align:center;
+}
+.preset-btn:hover{
+  background:var(--surf2);border-color:var(--bdr2);color:var(--txt);
+}
+.preset-btn.active{
+  background:rgba(0,229,179,.12);border-color:var(--a);color:var(--a);
+}
+
+.calib-reset-btn{
+  width:100%;padding:9px 14px;border-radius:var(--r1);
+  background:var(--surf);border:1px solid var(--bdr);
+  color:var(--txt3);font-size:.72rem;font-weight:600;
+  transition:var(--t);cursor:pointer;
+}
+.calib-reset-btn:hover{color:var(--d);border-color:rgba(248,113,113,.3);}
+
+/* Tool active states */
+#btn-tape.active{
+  background:rgba(0,229,179,.15);border-color:var(--a);color:var(--a);
+}
+#btn-calib.active{
+  background:rgba(251,191,36,.15);border-color:var(--w);color:var(--w);
+}
 
 /* ═══ ANIMATIONS ═══ */
 @keyframes spin{to{transform:rotate(360deg)}}

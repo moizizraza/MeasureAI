@@ -123,32 +123,62 @@ const MeasureEngine = (() => {
   const smoothingBuffer = {};  // { label: [measurements] }
   const SMOOTH_N = 5;
 
+  // ── Manual & fine-tune calibration ──────────────
+  let manualPxPerMm   = null;
+  let scaleMultiplier = 1.0;
+
+  function setManualScale(pxPerMm) {
+    if (pxPerMm && pxPerMm > 0) {
+      manualPxPerMm = pxPerMm;
+      globalPxPerMm = pxPerMm;
+      calibrationHistory = [pxPerMm];
+    }
+  }
+
+  function setScaleMultiplier(mult) {
+    scaleMultiplier = Math.max(0.5, Math.min(2.0, mult));
+  }
+
+  function getScaleMultiplier() {
+    return scaleMultiplier;
+  }
+
+  function getEffectivePxPerMm() {
+    return (manualPxPerMm || globalPxPerMm || 1.0) * scaleMultiplier;
+  }
+
+  function pxToMm(pixels) {
+    const eff = getEffectivePxPerMm();
+    return pixels / eff;
+  }
+
+  function isManuallyLocked() {
+    return manualPxPerMm !== null;
+  }
+
   /* ────────────────────────────────────────────────
      Core measurement function
-     Given a detected prediction + canvas dimensions,
-     returns real-world measurement data.
    ──────────────────────────────────────────────── */
   function measure(pred, videoW, videoH) {
     const label = pred.class.toLowerCase();
     const dim   = DIM_DB[label] || FALLBACK;
-    const [, , bboxW, bboxH] = pred.bbox;
+    const [, , rawW, rawH] = pred.bbox;
 
-    // Pixel-per-mm: derived from this object's known real width
+    // Compensate for standard SSD bounding box padding (~5% margin)
+    const bboxW = rawW * 0.95;
+    const bboxH = rawH * 0.95;
+
+    // Derived local ratio
     const localPxPerMm = bboxW / dim.w;
-    const localPxPerMmH = bboxH / dim.h;
-
-    // Use horizontal ratio as primary (usually more reliable)
     const pxPerMm = localPxPerMm;
 
-    // Estimate distance using simple pinhole camera model
-    // distance = (realWidth_mm * focalLength_px) / bbox_px
-    // We estimate focal length from sensor (typical phone: ~1000-1500px for 1280px wide)
-    const estimatedFocal = videoW * 0.8;
+    // Distance estimation using pinhole camera model
+    const estimatedFocal = videoW * 0.85;
     const distanceMm = (dim.w * estimatedFocal) / bboxW;
     const distanceCm = distanceMm / 10;
 
-    // Compute measured dimensions using calibrated pxPerMm
-    const effectivePxPerMm = globalPxPerMm || pxPerMm;
+    // Compute measured dimensions using calibrated pxPerMm + fine-tune multiplier
+    const effectivePxPerMm = (manualPxPerMm || globalPxPerMm || pxPerMm) * scaleMultiplier;
     const measuredW = bboxW / effectivePxPerMm;
     const measuredH = bboxH / effectivePxPerMm;
 
@@ -163,28 +193,27 @@ const MeasureEngine = (() => {
       widthMm:    smoothed.w,
       heightMm:   smoothed.h,
       distanceCm: smoothed.dist,
-      pxPerMm,
+      pxPerMm:    effectivePxPerMm,
       knownDim:   dim,
     };
   }
 
   /* ────────────────────────────────────────────────
-     Auto-calibration:
-     Each frame, collect all detected objects' implied
-     px/mm ratios. Weight by confidence + bbox area.
-     Keep a rolling average → globalPxPerMm.
+     Auto-calibration (only updates if NOT manually locked)
    ──────────────────────────────────────────────── */
   function calibrate(predictions, videoW, videoH) {
     frameCount++;
+    if (manualPxPerMm !== null) return; // Locked by user calibration
 
     const samples = predictions.map(pred => {
       const label = pred.class.toLowerCase();
       const dim   = DIM_DB[label];
       if (!dim || dim.confidence === 'low') return null;
 
-      const [, , bboxW, bboxH] = pred.bbox;
+      const [, , rawW, rawH] = pred.bbox;
+      const bboxW = rawW * 0.95;
       const pxPerMm = bboxW / dim.w;
-      const area    = bboxW * bboxH;
+      const area    = rawW * rawH;
       const confWeight = dim.confidence === 'high' ? 3 : 1;
       const weight = confWeight * pred.score * (area / (videoW * videoH));
 
@@ -237,17 +266,23 @@ const MeasureEngine = (() => {
   function reset() {
     calibrationHistory = [];
     globalPxPerMm = null;
+    manualPxPerMm = null;
+    scaleMultiplier = 1.0;
     Object.keys(smoothingBuffer).forEach(k => delete smoothingBuffer[k]);
     frameCount = 0;
   }
 
   function getCalibrationInfo() {
-    if (!globalPxPerMm) return { calibrated: false, pxPerMm: null, sampleCount: 0 };
+    const isLocked = manualPxPerMm !== null;
+    const pxMm = getEffectivePxPerMm();
+    if (!globalPxPerMm && !isLocked) return { calibrated: false, pxPerMm: null, sampleCount: 0, isLocked: false };
     return {
       calibrated:   true,
-      pxPerMm:      globalPxPerMm,
+      pxPerMm:      pxMm,
       sampleCount:  calibrationHistory.length,
-      accuracy:     calibrationHistory.length >= 10 ? 'high' : calibrationHistory.length >= 5 ? 'med' : 'low',
+      accuracy:     isLocked ? '100% (Locked)' : calibrationHistory.length >= 10 ? 'high' : calibrationHistory.length >= 5 ? 'med' : 'low',
+      isLocked,
+      scaleMultiplier,
     };
   }
 
@@ -263,6 +298,12 @@ const MeasureEngine = (() => {
     reset,
     getCalibrationInfo,
     getEmoji,
+    setManualScale,
+    setScaleMultiplier,
+    getScaleMultiplier,
+    getEffectivePxPerMm,
+    pxToMm,
+    isManuallyLocked,
     DIM_DB,
   };
 })();

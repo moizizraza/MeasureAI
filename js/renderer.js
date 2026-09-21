@@ -38,12 +38,23 @@ const Renderer = (() => {
   }
 
   /* ── Main draw call ── */
-  function draw(items, unit = 'cm') {
+  function draw(items, unit = 'cm', tapeState = null, guideState = null) {
     syncSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
     // Draw unselected (dim) first, then selected (bright) on top
     items.filter(m => !m.selected).forEach(m => drawObject(m, unit, false));
     items.filter(m =>  m.selected).forEach(m => drawObject(m, unit, true));
+
+    // Draw reference card guide box if calibration guide is active
+    if (guideState && guideState.active) {
+      drawGuideBox(guideState);
+    }
+
+    // Draw virtual tape measure if points exist
+    if (tapeState && (tapeState.pA || tapeState.pB)) {
+      drawTape(tapeState, unit);
+    }
   }
 
   function drawObject(m, unit, selected) {
@@ -233,14 +244,147 @@ const Renderer = (() => {
     return null;
   }
 
-  function snapshot() {
-    const w = canvas.width, h = canvas.height;
-    const tmp = document.createElement('canvas');
-    tmp.width = w; tmp.height = h;
-    const tc = tmp.getContext('2d');
-    tc.drawImage(videoEl, 0, 0, w, h);
-    tc.drawImage(canvas, 0, 0);
-    return tmp.toDataURL('image/jpeg', 0.87);
+  /* ── Virtual Tape Measure ── */
+  function drawTape(tape, unit) {
+    const { pA, pB, distMm } = tape;
+    const color = '#00e5b3';
+
+    ctx.save();
+
+    // Draw Point A
+    if (pA) {
+      drawPointMarker(pA.x, pA.y, 'A', color);
+    }
+
+    // Draw Point B + connecting line
+    if (pB && pA) {
+      drawPointMarker(pB.x, pB.y, 'B', color);
+
+      // Connecting line
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.moveTo(pA.x, pA.y);
+      ctx.lineTo(pB.x, pB.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+
+      // Distance pill in the middle
+      const midX = (pA.x + pB.x) / 2;
+      const midY = (pA.y + pB.y) / 2;
+      const labelText = `📏 ${MeasureEngine.format(distMm, unit)}`;
+      ctx.font = '700 12px JetBrains Mono, monospace';
+      const tw = ctx.measureText(labelText).width;
+
+      ctx.fillStyle = 'rgba(6, 8, 15, 0.9)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(midX - tw/2 - 10, midY - 14, tw + 20, 26, 6);
+      else ctx.rect(midX - tw/2 - 10, midY - 14, tw + 20, 26);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = color;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(labelText, midX, midY - 1);
+    }
+
+    ctx.restore();
+  }
+
+  function drawPointMarker(x, y, label, color) {
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+
+    // Outer circle
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner dot
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Crosshairs
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x - 20, y); ctx.lineTo(x - 6, y);
+    ctx.moveTo(x + 6, y); ctx.lineTo(x + 20, y);
+    ctx.moveTo(x, y - 20); ctx.lineTo(x, y - 6);
+    ctx.moveTo(x, y + 6); ctx.lineTo(x, y + 20);
+    ctx.stroke();
+
+    // Label tag
+    ctx.font = '800 10px Inter, sans-serif';
+    ctx.fillStyle = 'rgba(6, 8, 15, 0.85)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x + 10, y - 22, 18, 16, 4);
+    else ctx.rect(x + 10, y - 22, 18, 16);
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + 19, y - 14);
+
+    ctx.restore();
+  }
+
+  /* ── Reference Card Alignment Guide Box ── */
+  function drawGuideBox(guide) {
+    const cw = canvas.width, ch = canvas.height;
+    // Standard credit card aspect ratio: 85.6mm / 53.98mm = 1.586
+    const boxW = Math.min(cw * 0.65, 260);
+    const boxH = boxW / 1.586;
+    const boxX = (cw - boxW) / 2;
+    const boxY = (ch - boxH) / 2;
+
+    guide.box = { x: boxX, y: boxY, w: boxW, h: boxH };
+
+    ctx.save();
+    // Dim surrounding area
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fillRect(0, 0, cw, boxY);
+    ctx.fillRect(0, boxY + boxH, cw, ch - (boxY + boxH));
+    ctx.fillRect(0, boxY, boxX, boxH);
+    ctx.fillRect(boxX + boxW, boxY, cw - (boxX + boxW), boxH);
+
+    // Glowing target card outline
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#fbbf24';
+    ctx.shadowBlur = 16;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(boxX, boxY, boxW, boxH, 10);
+    else ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.stroke();
+
+    // Center icon & instruction
+    ctx.shadowBlur = 0;
+    ctx.font = '700 12px Inter, sans-serif';
+    ctx.fillStyle = '#fbbf24';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('💳 Place Credit Card / ID inside box', cw / 2, boxY + boxH / 2 - 8);
+    ctx.font = '500 10px Inter, sans-serif';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.fillText('Tap "Calibrate" to lock 100% precision scale', cw / 2, boxY + boxH / 2 + 10);
+
+    ctx.restore();
   }
 
   function clear() { ctx.clearRect(0, 0, canvas.width, canvas.height); }
