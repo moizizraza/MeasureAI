@@ -102,9 +102,12 @@
   setStatus('Detecting objects…', 'live');
 
   /* ═══════════════════════════════════
-     STEP 4 — Detection Loop
+     STEP 4 — Detection Loop (Tap-to-Measure)
   ═══════════════════════════════════ */
   const { w: vidW, h: vidH } = Camera.getDims();
+
+  // Track which object labels the user has tapped to measure
+  const selectedForMeasure = new Set();
 
   Detector.startLoop(preds => {
     if (S.frozen) return;
@@ -115,40 +118,86 @@
     S.fpsTs = now;
     $('fps-chip').textContent = `${S.fps} fps`;
 
-    // Calibrate scale (use ALL detections for calibration even when filtering)
+    // Calibrate scale (use ALL detections for best calibration)
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
-    // Apply object filter
+    // Apply object filter (from filter drawer)
     let filtered = preds;
     if (S.filterMode === 'custom' && S.selectedObjects.size > 0) {
       filtered = preds.filter(p => S.selectedObjects.has(p.class));
     }
 
-    // Measure each detected object
-    const measurements = filtered.map(pred => ({
-      label:       pred.class,
-      bbox:        pred.bbox,
-      score:       pred.score,
-      measurement: MeasureEngine.measure(pred, w || vidW, h || vidH),
-    }));
+    // Build items: measure ALL, but mark selected ones
+    const items = filtered.map(pred => {
+      const isSelected = selectedForMeasure.has(pred.class);
+      return {
+        label:       pred.class,
+        bbox:        pred.bbox,
+        score:       pred.score,
+        selected:    isSelected,
+        measurement: MeasureEngine.measure(pred, w || vidW, h || vidH),
+      };
+    });
 
-    S.lastMeasurements = measurements;
+    S.lastMeasurements = items;
 
-    // Draw
-    Renderer.draw(measurements, S.unit);
+    // Draw (renderer handles dim vs bright based on .selected)
+    Renderer.draw(items, S.unit);
 
-    // Update results strip
-    renderCards(measurements);
+    // Update results strip (only show cards for selected objects)
+    const measured = items.filter(m => m.selected);
+    renderCards(measured);
 
-    // Object count badge
-    if (preds.length > 0) {
-      setStatus(`${preds.length} object${preds.length > 1 ? 's' : ''} detected`, 'live');
+    // Status
+    const selCount = measured.length;
+    const totCount = filtered.length;
+    if (totCount > 0) {
+      if (selCount > 0) {
+        setStatus(`Measuring ${selCount} of ${totCount} objects`, 'live');
+      } else {
+        setStatus(`${totCount} object${totCount > 1 ? 's' : ''} found — tap to measure`, 'live');
+      }
     } else {
       setStatus('Scanning for objects…', 'live');
     }
   });
+
+  /* ═══════════════════════════════════
+     TAP-TO-SELECT ON CANVAS
+  ═══════════════════════════════════ */
+  const canvasEl = $('canvas');
+
+  function handleCanvasTap(e) {
+    if (S.frozen) return;
+    e.preventDefault();
+
+    const rect = canvasEl.getBoundingClientRect();
+    let px, py;
+    if (e.touches && e.touches.length > 0) {
+      px = e.touches[0].clientX - rect.left;
+      py = e.touches[0].clientY - rect.top;
+    } else {
+      px = e.clientX - rect.left;
+      py = e.clientY - rect.top;
+    }
+
+    const hit = Renderer.hitTest(S.lastMeasurements, px, py);
+    if (hit) {
+      if (selectedForMeasure.has(hit.label)) {
+        selectedForMeasure.delete(hit.label);
+        toast(`Stopped measuring: ${hit.label}`, '', 1500);
+      } else {
+        selectedForMeasure.add(hit.label);
+        toast(`📏 Now measuring: ${hit.label}`, 's', 1500);
+      }
+    }
+  }
+
+  canvasEl.style.pointerEvents = 'auto';
+  canvasEl.addEventListener('click', handleCanvasTap);
+  canvasEl.addEventListener('touchstart', handleCanvasTap, { passive: false });
 
   /* ═══════════════════════════════════
      MEASUREMENT CARDS

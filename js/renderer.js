@@ -1,5 +1,7 @@
 /* ════════════════════════════════════════════
-   renderer.js v3 — Enhanced canvas drawing
+   renderer.js v4 — Tap-to-Measure Canvas
+   Detected objects: dim outline + label
+   Selected objects: full neon + measurements
    ════════════════════════════════════════════ */
 
 const Renderer = (() => {
@@ -25,7 +27,6 @@ const Renderer = (() => {
     }
   }
 
-  // Video-space bbox → canvas-space (object-fit:cover aware)
   function toCanvas(bbox) {
     const vw = videoEl.videoWidth  || 1;
     const vh = videoEl.videoHeight || 1;
@@ -37,60 +38,77 @@ const Renderer = (() => {
   }
 
   /* ── Main draw call ── */
-  function draw(measurements, unit = 'cm') {
+  function draw(items, unit = 'cm') {
     syncSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    measurements.forEach(m => drawObject(m, unit));
+    // Draw unselected (dim) first, then selected (bright) on top
+    items.filter(m => !m.selected).forEach(m => drawObject(m, unit, false));
+    items.filter(m =>  m.selected).forEach(m => drawObject(m, unit, true));
   }
 
-  function drawObject(m, unit) {
+  function drawObject(m, unit, selected) {
     const [cx, cy, cw, ch] = toCanvas(m.bbox);
     const color = colorFor(m.label);
 
     ctx.save();
 
-    // ── Glow + box ──────────────────────────────
-    ctx.shadowColor = color; ctx.shadowBlur = 16;
-    ctx.strokeStyle = color; ctx.lineWidth = 2;
-    ctx.strokeRect(cx, cy, cw, ch);
+    if (selected) {
+      // ── SELECTED: Full glow + box ──
+      ctx.shadowColor = color; ctx.shadowBlur = 18;
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+      ctx.strokeRect(cx, cy, cw, ch);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle  = hexRgba(color, 0.08);
+      ctx.fillRect(cx, cy, cw, ch);
 
-    // Semi-transparent fill
-    ctx.shadowBlur = 0;
-    ctx.fillStyle  = hexRgba(color, 0.06);
-    ctx.fillRect(cx, cy, cw, ch);
+      // Corner accents
+      const cs = 16;
+      ctx.lineWidth = 3; ctx.shadowBlur = 10; ctx.shadowColor = color;
+      strokeCorner(cx,    cy,    cs, 1,  1);
+      strokeCorner(cx+cw, cy,    cs, -1, 1);
+      strokeCorner(cx,    cy+ch, cs, 1,  -1);
+      strokeCorner(cx+cw, cy+ch, cs, -1, -1);
+      ctx.restore();
 
-    // Corner accents
-    const cs = 14;
-    ctx.lineWidth = 3; ctx.shadowBlur = 8; ctx.shadowColor = color;
-    strokeCorner(cx,    cy,    cs, 1,  1);
-    strokeCorner(cx+cw, cy,    cs, -1, 1);
-    strokeCorner(cx,    cy+ch, cs, 1,  -1);
-    strokeCorner(cx+cw, cy+ch, cs, -1, -1);
-
-    ctx.restore();
-
-    // ── Measurement overlays ─────────────────────
-    if (m.measurement) {
-      const meas = m.measurement;
-      const wLabel = MeasureEngine.format(meas.widthMm,  unit);
-      const hLabel = MeasureEngine.format(meas.heightMm, unit);
-
-      // Width arrow (below box)
-      drawDimArrow(cx, cy+ch+12, cx+cw, cy+ch+12, `↔ ${wLabel}`, color, false);
-      // Height arrow (right of box)
-      drawDimArrow(cx+cw+12, cy, cx+cw+12, cy+ch, `↕ ${hLabel}`, color, true);
-
-      // Distance label (bottom-right of box)
-      if (meas.distanceCm) {
-        const distLabel = MeasureEngine.formatDist(meas.distanceCm);
-        if (distLabel) drawTag(ctx, cx + cw - 2, cy + ch + 28, distLabel, 'rgba(255,255,255,0.35)', '#fff');
+      // ── Measurement overlays ──
+      if (m.measurement) {
+        const meas = m.measurement;
+        const wLabel = MeasureEngine.format(meas.widthMm,  unit);
+        const hLabel = MeasureEngine.format(meas.heightMm, unit);
+        drawDimArrow(cx, cy+ch+14, cx+cw, cy+ch+14, `↔ ${wLabel}`, color, false);
+        drawDimArrow(cx+cw+14, cy, cx+cw+14, cy+ch, `↕ ${hLabel}`, color, true);
+        if (meas.distanceCm) {
+          const distLabel = MeasureEngine.formatDist(meas.distanceCm);
+          if (distLabel) drawTag(ctx, cx + cw - 2, cy + ch + 30, distLabel, 'rgba(255,255,255,0.35)', '#fff');
+        }
       }
-    }
 
-    // ── Label pill ───────────────────────────────
-    const confPct = Math.round((m.measurement?.confScore || 0) * 100);
-    const emoji   = m.measurement?.emoji || '📦';
-    drawLabel(cx, cy, `${emoji} ${m.label}  ${confPct}%`, color);
+      // Label pill (bright)
+      const confPct = Math.round((m.measurement?.confScore || 0) * 100);
+      const emoji   = m.measurement?.emoji || '📦';
+      drawLabel(cx, cy, `${emoji} ${m.label}  ${confPct}%`, color);
+
+      // "TAP TO DESELECT" hint - small
+      drawSmallHint(cx + cw/2, cy + ch - 8, '✓ Measuring', color);
+
+    } else {
+      // ── UNSELECTED: Dim dashed outline ──
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(cx, cy, cw, ch);
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+
+      // Dim label
+      const emoji = m.measurement?.emoji || '📦';
+      drawDimLabel(cx, cy, `${emoji} ${m.label}`, color);
+
+      // "TAP TO MEASURE" hint
+      drawSmallHint(cx + cw/2, cy + ch/2, 'Tap to measure', 'rgba(255,255,255,0.6)');
+    }
   }
 
   function strokeCorner(x, y, s, dx, dy) {
@@ -107,47 +125,28 @@ const Renderer = (() => {
     ctx.shadowColor = color; ctx.shadowBlur = 4;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.setLineDash([]);
-
-    // Arrowheads
     const sz = 4.5;
     ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-    if (!vertical) {
-      arrowHead(x1, y1,  sz,  1, false);
-      arrowHead(x2, y2,  sz, -1, false);
-    } else {
-      arrowHead(x1, y1, sz,  1, true);
-      arrowHead(x2, y2, sz, -1, true);
-    }
-
-    // Label
-    ctx.font = `600 10px JetBrains Mono, monospace`;
+    if (!vertical) { arrowHead(x1,y1,sz,1,false); arrowHead(x2,y2,sz,-1,false); }
+    else           { arrowHead(x1,y1,sz,1,true);  arrowHead(x2,y2,sz,-1,true);  }
+    ctx.font = '600 10px JetBrains Mono, monospace';
     ctx.shadowBlur = 0;
     const tw = ctx.measureText(label).width;
-    let lx, ly;
-    if (!vertical) {
-      lx = (x1+x2)/2 - tw/2 - 5; ly = y1 - 20;
-    } else {
-      // rotate
+    if (vertical) {
       ctx.save();
       ctx.translate(x1+16, (y1+y2)/2);
       ctx.rotate(-Math.PI/2);
-      lx = -tw/2 - 5; ly = -18;
-      drawPill(ctx, lx, ly, tw+10, 16, 'rgba(4,6,14,.85)', color, label);
-      ctx.restore();
-      ctx.restore();
-      return;
+      drawPill(ctx, -tw/2-5, -18, tw+10, 16, 'rgba(4,6,14,.85)', color, label);
+      ctx.restore(); ctx.restore(); return;
     }
-    drawPill(ctx, lx, ly, tw+10, 16, 'rgba(4,6,14,.85)', color, label);
+    drawPill(ctx, (x1+x2)/2-tw/2-5, y1-20, tw+10, 16, 'rgba(4,6,14,.85)', color, label);
     ctx.restore();
   }
 
-  function arrowHead(x, y, sz, dir, vert) {
+  function arrowHead(x,y,sz,dir,vert) {
     ctx.beginPath();
-    if (!vert) {
-      ctx.moveTo(x+dir*sz, y-sz/2); ctx.lineTo(x, y); ctx.lineTo(x+dir*sz, y+sz/2);
-    } else {
-      ctx.moveTo(x-sz/2, y+dir*sz); ctx.lineTo(x, y); ctx.lineTo(x+sz/2, y+dir*sz);
-    }
+    if (!vert) { ctx.moveTo(x+dir*sz,y-sz/2); ctx.lineTo(x,y); ctx.lineTo(x+dir*sz,y+sz/2); }
+    else       { ctx.moveTo(x-sz/2,y+dir*sz); ctx.lineTo(x,y); ctx.lineTo(x+sz/2,y+dir*sz); }
     ctx.stroke();
   }
 
@@ -156,11 +155,8 @@ const Renderer = (() => {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(x, y, w, h, 4); else ctx.rect(x, y, w, h);
     ctx.fill();
-    ctx.strokeStyle = hexRgba(border, 0.55);
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = border;
-    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.strokeStyle = hexRgba(border, 0.55); ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = border; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText(text, x+5, y+3);
   }
 
@@ -174,9 +170,41 @@ const Renderer = (() => {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(bx, by, tw+px*2, th+py*2, 5); else ctx.rect(bx, by, tw+px*2, th+py*2);
     ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText(text, bx+px, by+py);
+    ctx.restore();
+  }
+
+  // Dimmed label for unselected objects
+  function drawDimLabel(cx, cy, text, color) {
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.font = '600 10px Inter, sans-serif';
+    const tw = ctx.measureText(text).width;
+    const bx = cx, by = Math.max(cy - 22, 2);
+    ctx.fillStyle = 'rgba(4,6,14,0.7)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, tw+14, 18, 4); else ctx.rect(bx, by, tw+14, 18);
+    ctx.fill();
+    ctx.strokeStyle = hexRgba(color, 0.3); ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = hexRgba(color, 0.8); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(text, bx+7, by+4);
+    ctx.restore();
+  }
+
+  // Small centered hint text
+  function drawSmallHint(cx, cy, text, color) {
+    ctx.save();
+    ctx.font = '600 9px Inter, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(text).width;
+    ctx.fillStyle = 'rgba(4,6,14,0.65)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(cx - tw/2 - 8, cy - 9, tw + 16, 18, 9);
+    else ctx.rect(cx - tw/2 - 8, cy - 9, tw + 16, 18);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.fillText(text, cx, cy);
     ctx.restore();
   }
 
@@ -188,10 +216,21 @@ const Renderer = (() => {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(x - tw - 12, y, tw+10, 15, 3); else ctx.rect(x - tw - 12, y, tw+10, 15);
     ctx.fill();
-    ctx.fillStyle = fg;
-    ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+    ctx.fillStyle = fg; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
     ctx.fillText(text, x - 4, y + 2);
     ctx.restore();
+  }
+
+  /* ── Hit test: which object bbox contains (px, py)? ── */
+  function hitTest(items, px, py) {
+    // Check in reverse so top-drawn (selected) items are hit first
+    for (let i = items.length - 1; i >= 0; i--) {
+      const [cx, cy, cw, ch] = toCanvas(items[i].bbox);
+      if (px >= cx && px <= cx + cw && py >= cy && py <= cy + ch) {
+        return items[i];
+      }
+    }
+    return null;
   }
 
   function snapshot() {
@@ -213,5 +252,5 @@ const Renderer = (() => {
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  return { draw, clear, snapshot, syncSize };
+  return { draw, clear, snapshot, syncSize, hitTest, toCanvas };
 })();
