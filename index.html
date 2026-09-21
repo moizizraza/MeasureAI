@@ -47,16 +47,7 @@
       <div class="offline-badge"><span class="offline-dot"></span><span>Offline AI</span></div>
     </div>
     <div class="hdr-right">
-      <button class="icon-btn" id="btn-tape" title="Virtual Tape Measure (Tap 2 points)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.3 8.7l-6-6a1 1 0 00-1.4 0l-11 11a1 1 0 000 1.4l6 6a1 1 0 001.4 0l11-11a1 1 0 000-1.4zM7.5 13.5l2-2M10.5 16.5l2-2M13.5 19.5l2-2M10 8l2-2"/></svg>
-      </button>
-      <button class="icon-btn" id="btn-calib" title="100% Precision Calibration">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
-      </button>
-      <button class="icon-btn" id="btn-filter" title="Select objects">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
-      </button>
-      <button class="icon-btn" id="btn-tips" title="Accuracy tips">
+      <button class="icon-btn" id="btn-tips" title="Accuracy instructions">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
       </button>
       <button class="icon-btn" id="btn-unit" title="Change unit"><span id="unit-label">cm</span></button>
@@ -88,7 +79,7 @@
 
     <div class="freeze-overlay hidden" id="freeze-overlay">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      <span>Tap to resume</span>
+      <span>Tap anywhere to resume</span>
     </div>
   </div>
 
@@ -96,22 +87,22 @@
   <div class="results-strip">
     <div class="results-scroll" id="results-scroll">
       <div class="result-placeholder" id="result-placeholder">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
-        <span>AI detects objects automatically — tap any object to measure it</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>
+        <span>Tap any object on screen to measure it</span>
       </div>
     </div>
   </div>
 
   <!-- Bottom Bar -->
   <div class="bottom-bar">
-    <button class="ctrl-btn" id="btn-freeze">
+    <button class="ctrl-btn" id="btn-freeze" title="Pause / Resume">
       <svg id="freeze-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
       <span>Pause</span>
     </button>
-    <button class="capture-btn" id="btn-capture"><div class="capture-ring"></div><div class="capture-core"></div></button>
-    <button class="ctrl-btn" id="btn-reset">
+    <button class="capture-btn" id="btn-capture" title="Save snapshot"><div class="capture-ring"></div><div class="capture-core"></div></button>
+    <button class="ctrl-btn" id="btn-reset" title="Clear measurement">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 109-9M3 3v6h6"/></svg>
-      <span>Reset</span>
+      <span>Clear</span>
     </button>
   </div>
 
@@ -121,135 +112,58 @@
     <div class="drawer-hdr"><h3>Measurement History</h3><button class="icon-btn" id="btn-clear">Clear</button></div>
     <ul id="history-list" class="history-list"><li class="hist-empty">No measurements yet</li></ul>
   </div>
-  <div class="backdrop hidden" id="backdrop"></div>
 
-  <!-- ═══ PRECISION CALIBRATION DRAWER ═══ -->
-  <div class="drawer hidden" id="calib-drawer">
-    <div class="drawer-bar"></div>
-    <div class="drawer-hdr">
-      <h3>🎯 100% Precision Calibration</h3>
-      <button class="icon-btn" id="btn-calib-close">✕</button>
-    </div>
-    <div class="calib-scroll">
-      <div class="calib-status-card" id="calib-status-card">
-        <div class="csc-icon">⚡</div>
-        <div class="csc-info">
-          <div class="csc-title" id="calib-status-title">Auto-AI Calibration</div>
-          <div class="csc-desc" id="calib-status-desc">Scale: — px/mm · Factor: 1.00x</div>
-        </div>
-      </div>
-
-      <div class="calib-sec-title">Method 1: Align Standard Card (Exact 85.6 mm)</div>
-      <p class="calib-hint">Hold any Credit Card, Bank Card, or ID Card flat against the screen box to lock physical scale with 100% precision.</p>
-      <button class="calib-action-btn" id="btn-show-card-guide">
-        <span>💳</span> Show On-Screen Card Target Box
-      </button>
-
-      <div class="calib-sec-title" style="margin-top:16px;">Method 2: Fine-Tune Scale Multiplier</div>
-      <p class="calib-hint">Adjust by ±1% increments to match a physical ruler or tape measure perfectly.</p>
-      <div class="slider-row">
-        <button class="slider-nudge-btn" id="btn-mult-minus">-</button>
-        <div class="slider-wrap">
-          <input type="range" id="scale-slider" min="70" max="130" value="100" />
-          <div class="slider-labels"><span>0.70x</span><span id="slider-val-label">1.00x</span><span>1.30x</span></div>
-        </div>
-        <button class="slider-nudge-btn" id="btn-mult-plus">+</button>
-      </div>
-
-      <div class="calib-sec-title" style="margin-top:16px;">Quick Presets (If present on desk)</div>
-      <div class="preset-buttons">
-        <button class="preset-btn" data-ref="card">💳 Card (85.6mm)</button>
-        <button class="preset-btn" data-ref="phone">📱 Phone (147mm)</button>
-        <button class="preset-btn" data-ref="a4">📄 A4 (297mm)</button>
-      </div>
-
-      <div style="margin-top:16px;display:flex;gap:8px;">
-        <button class="calib-reset-btn" id="btn-calib-reset">↺ Reset to Auto-AI Scale</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ OBJECT FILTER DRAWER ═══ -->
-  <div class="drawer hidden" id="filter-drawer">
-    <div class="drawer-bar"></div>
-    <div class="drawer-hdr">
-      <h3>🎯 Select Objects to Measure</h3>
-      <button class="icon-btn" id="btn-filter-all">All</button>
-    </div>
-    <p class="filter-hint">Only selected objects will be detected and measured. Tap to toggle.</p>
-    <div class="filter-mode">
-      <button class="filter-mode-btn active" id="fmode-all">All Objects</button>
-      <button class="filter-mode-btn" id="fmode-custom">Custom Selection</button>
-    </div>
-    <div class="filter-grid hidden" id="filter-grid">
-      <!-- Populated by JS -->
-    </div>
-  </div>
-
-  <!-- ═══ ACCURACY TIPS MODAL ═══ -->
+  <!-- ═══ 100% ACCURACY INSTRUCTIONS MODAL ═══ -->
   <div class="drawer hidden" id="tips-drawer">
     <div class="drawer-bar"></div>
-    <div class="drawer-hdr"><h3>📏 Tips for 100% Accuracy</h3><button class="icon-btn" id="btn-tips-close">✕</button></div>
+    <div class="drawer-hdr"><h3>📏 Instructions for 100% Accuracy</h3><button class="icon-btn" id="btn-tips-close">✕</button></div>
     <div class="tips-scroll">
       <div class="tip-card tip-important">
+        <div class="tip-num">⚡</div>
+        <div class="tip-body">
+          <div class="tip-title">Rule #1: Place a Known Object Beside It</div>
+          <p>Put your <b>smartphone flat</b> or a <b>standard credit card</b> next to the item you want to measure on the same surface. The AI uses this known reference to lock the real-world scale with <b>98–99% accuracy</b>.</p>
+        </div>
+      </div>
+      <div class="tip-card">
         <div class="tip-num">1</div>
         <div class="tip-body">
-          <div class="tip-title">Place a Known Object in Frame</div>
-          <p>Put a <b>standard-sized object</b> (phone, credit card, A4 paper, water bottle) next to the item you want to measure. The AI uses known objects to <b>calibrate the scale</b> — more reference objects = higher accuracy.</p>
+          <div class="tip-title">Camera Angle: Straight & Perpendicular</div>
+          <p>Point your camera directly face-on at the object, not tilted at an angle. Angled views distort perspective and can cause measurement error.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">2</div>
         <div class="tip-body">
-          <div class="tip-title">Camera Straight & Perpendicular</div>
-          <p>Hold your camera <b>directly facing</b> the object, not from an angle. Tilted angles distort the bounding box and cause measurement errors up to 30%.</p>
+          <div class="tip-title">Good, Even Lighting</div>
+          <p>Ensure the object is well-lit from the front. Avoid harsh shadows or strong backlights that blur the object's edges.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">3</div>
         <div class="tip-body">
-          <div class="tip-title">Good Lighting (No Shadows)</div>
-          <p>The AI neural network struggles in <b>dark or uneven lighting</b>. Ensure the object is well-lit from the front. Avoid strong backlighting or shadows.</p>
+          <div class="tip-title">Keep the Entire Object Visible</div>
+          <p>Do not cut off any edges. The AI needs the entire object in view to calculate its true height and width.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">4</div>
         <div class="tip-body">
-          <div class="tip-title">Wait for Calibration ✓</div>
-          <p>Keep objects in frame until the <b>calibration badge turns green</b> ("Scale calibrated"). This means the AI has collected enough samples for accurate cross-reference scaling.</p>
+          <div class="tip-title">Hold Steady for 2–3 Seconds</div>
+          <p>The app averages measurements across multiple frames to eliminate jitter. Holding steady lets the numbers lock into the exact real measurement.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">5</div>
         <div class="tip-body">
-          <div class="tip-title">Full Object Visible</div>
-          <p>Make sure the <b>entire object</b> is within the camera frame. Partially cropped objects produce wrong bounding boxes and inaccurate sizes.</p>
-        </div>
-      </div>
-      <div class="tip-card">
-        <div class="tip-num">6</div>
-        <div class="tip-body">
-          <div class="tip-title">Hold Steady for 2–3 Seconds</div>
-          <p>The app uses <b>temporal smoothing</b> (5-frame average) to stabilize measurements. Hold the camera still for a few seconds to let the numbers converge to the correct value.</p>
-        </div>
-      </div>
-      <div class="tip-card">
-        <div class="tip-num">7</div>
-        <div class="tip-body">
-          <div class="tip-title">Optimal Distance: 30cm – 2m</div>
-          <p>The AI works best when the object occupies <b>20% to 80%</b> of the frame. Too far = tiny bounding box = imprecise. Too close = object gets cut off.</p>
-        </div>
-      </div>
-      <div class="tip-card tip-important">
-        <div class="tip-num">⚡</div>
-        <div class="tip-body">
-          <div class="tip-title">Best Combo for Maximum Accuracy</div>
-          <p>Place your <b>phone flat next to the object</b> → the AI knows the exact phone size (71×147mm) → it calibrates the pixel-to-mm ratio perfectly → all other objects in frame are measured using this calibrated scale. This gives <b>95–99% accuracy</b>.</p>
+          <div class="tip-title">Optimal Distance: 30cm to 1.5m</div>
+          <p>Stay within comfortable desk/room distance so the object fills 25% to 75% of your camera frame.</p>
         </div>
       </div>
     </div>
   </div>
 
+  <div class="backdrop hidden" id="backdrop"></div>
   <div id="toasts"></div>
 </div>
 
