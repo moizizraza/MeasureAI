@@ -1,7 +1,7 @@
 /* ════════════════════════════════════════════
-   renderer.js — Clean Tap-To-Measure Canvas
-   Only selected objects are drawn.
-   Unselected objects have ZERO outlines or boxes (100% clean screen).
+   renderer.js — Ultra-Clean & High-Response Canvas
+   - ONLY selected objects are drawn (zero outlines on unselected items)
+   - Magnetic high-response touch hit-testing (28px finger pad + 90px snap)
    ════════════════════════════════════════════ */
 
 const Renderer = (() => {
@@ -10,7 +10,7 @@ const Renderer = (() => {
   const videoEl = document.getElementById('video');
 
   const PALETTE = [
-    '#7c6eff','#00e5b3','#f87171','#fbbf24',
+    '#00e5b3','#7c6eff','#f87171','#fbbf24',
     '#60a5fa','#fb923c','#c084fc','#34d399',
     '#f472b6','#a3e635','#38bdf8','#e879f9',
   ];
@@ -28,7 +28,7 @@ const Renderer = (() => {
     }
   }
 
-  // Convert video coordinates to canvas display space
+  // Convert video coords to canvas screen space
   function toCanvas(bbox) {
     const vw = videoEl.videoWidth  || 1;
     const vh = videoEl.videoHeight || 1;
@@ -45,7 +45,9 @@ const Renderer = (() => {
     syncSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Filter to only items that the user tapped to select
+    if (!items || items.length === 0) return;
+
+    // Filter to ONLY items the user tapped
     const selectedItems = items.filter(m => m.selected);
     selectedItems.forEach(m => drawSelectedObject(m, unit));
   }
@@ -68,7 +70,7 @@ const Renderer = (() => {
     ctx.fillStyle = hexRgba(color, 0.08);
     ctx.fillRect(cx, cy, cw, ch);
 
-    // Corner accents
+    // Corner brackets
     const cs = 16;
     ctx.lineWidth = 3.5;
     ctx.shadowBlur = 10;
@@ -223,16 +225,33 @@ const Renderer = (() => {
     ctx.restore();
   }
 
-  /* ── Hit test: detects which object the user tapped ── */
+  /* ── Ultra-Responsive Magnetic Hit-Testing ── */
   function hitTest(items, px, py) {
+    if (!items || items.length === 0) return null;
+
+    // 1. Direct hit with generous 28px finger padding
     for (let i = items.length - 1; i >= 0; i--) {
       const [cx, cy, cw, ch] = toCanvas(items[i].bbox);
-      // Give 10px tap margin for easy finger touch
-      if (px >= cx - 10 && px <= cx + cw + 10 && py >= cy - 10 && py <= cy + ch + 10) {
+      const pad = 28;
+      if (px >= cx - pad && px <= cx + cw + pad && py >= cy - pad && py <= cy + ch + pad) {
         return items[i];
       }
     }
-    return null;
+
+    // 2. Magnetic nearest hit within 90px radius
+    let closest = null;
+    let minDist = 90;
+    for (const item of items) {
+      const [cx, cy, cw, ch] = toCanvas(item.bbox);
+      const midX = cx + cw / 2;
+      const midY = cy + ch / 2;
+      const dist = Math.hypot(px - midX, py - midY);
+      if (dist < minDist) {
+        minDist = dist;
+        closest = item;
+      }
+    }
+    return closest;
   }
 
   function snapshot() {
@@ -250,9 +269,10 @@ const Renderer = (() => {
   }
 
   function hexRgba(hex, a) {
-    const r = parseInt(hex.slice(1,3), 16);
-    const g = parseInt(hex.slice(3,5), 16);
-    const b = parseInt(hex.slice(5,7), 16);
+    if (!hex || hex[0] !== '#') return `rgba(0, 229, 179, ${a})`;
+    const r = parseInt(hex.slice(1,3), 16) || 0;
+    const g = parseInt(hex.slice(3,5), 16) || 0;
+    const b = parseInt(hex.slice(5,7), 16) || 0;
     return `rgba(${r},${g},${b},${a})`;
   }
 
