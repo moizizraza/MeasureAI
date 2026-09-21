@@ -11,6 +11,8 @@
     history: [],
     lastMeasurements: [],
     fps: 0, fpsTs: 0,
+    filterMode: 'all',        // 'all' or 'custom'
+    selectedObjects: new Set(),  // classes selected in custom mode
   };
 
   /* ── DOM helpers ── */
@@ -113,13 +115,19 @@
     S.fpsTs = now;
     $('fps-chip').textContent = `${S.fps} fps`;
 
-    // Calibrate scale
+    // Calibrate scale (use ALL detections for calibration even when filtering)
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
+    // Apply object filter
+    let filtered = preds;
+    if (S.filterMode === 'custom' && S.selectedObjects.size > 0) {
+      filtered = preds.filter(p => S.selectedObjects.has(p.class));
+    }
+
     // Measure each detected object
-    const measurements = preds.map(pred => ({
+    const measurements = filtered.map(pred => ({
       label:       pred.class,
       bbox:        pred.bbox,
       score:       pred.score,
@@ -267,13 +275,11 @@
 
   // History
   $('btn-history').addEventListener('click', () => {
+    closeAllDrawers();
     $('history-drawer').classList.remove('hidden');
     $('backdrop').classList.remove('hidden');
   });
-  $('backdrop').addEventListener('click', () => {
-    $('history-drawer').classList.add('hidden');
-    $('backdrop').classList.add('hidden');
-  });
+  $('backdrop').addEventListener('click', closeAllDrawers);
   $('btn-clear').addEventListener('click', () => {
     S.history = [];
     $('history-list').innerHTML = '<li class="hist-empty">No measurements yet</li>';
@@ -282,6 +288,131 @@
 
   // Window resize
   window.addEventListener('resize', () => Renderer.syncSize());
+
+  /* ═══════════════════════════════════
+     OBJECT FILTER
+  ═══════════════════════════════════ */
+  const CATEGORIES = {
+    'Electronics':  ['laptop','cell phone','tv','keyboard','mouse','remote'],
+    'Kitchen':      ['bottle','wine glass','cup','fork','knife','spoon','bowl'],
+    'Appliances':   ['microwave','oven','toaster','refrigerator','sink'],
+    'Furniture':    ['chair','couch','bed','dining table','potted plant','toilet'],
+    'Food':         ['banana','apple','orange','sandwich','broccoli','carrot','pizza','donut','cake','hot dog'],
+    'Vehicles':     ['car','bicycle','motorcycle','airplane','bus','train','truck','boat'],
+    'People & Acc': ['person','backpack','handbag','suitcase','umbrella','tie'],
+    'Outdoor':      ['traffic light','fire hydrant','stop sign','parking meter','bench'],
+    'Animals':      ['dog','cat','bird','horse','sheep','cow','elephant','bear','zebra','giraffe'],
+    'Sports':       ['sports ball','frisbee','skateboard','surfboard','tennis racket','baseball bat','baseball glove','snowboard','skis','kite'],
+    'Other':        ['book','clock','vase','scissors','teddy bear','hair drier','toothbrush'],
+  };
+
+  // Build filter chips
+  function buildFilterGrid() {
+    const grid = $('filter-grid');
+    grid.innerHTML = '';
+    for (const [cat, items] of Object.entries(CATEGORIES)) {
+      const catLabel = document.createElement('div');
+      catLabel.style.cssText = 'width:100%;font-size:.65rem;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:.06em;margin-top:8px;padding:0 2px;';
+      catLabel.textContent = cat;
+      grid.appendChild(catLabel);
+
+      items.forEach(name => {
+        const emoji = MeasureEngine.getEmoji ? MeasureEngine.getEmoji(name) : '📦';
+        const chip = document.createElement('div');
+        chip.className = 'filter-chip' + (S.selectedObjects.has(name) ? ' selected' : '');
+        chip.dataset.obj = name;
+        chip.innerHTML = `<span class="fc-emoji">${emoji}</span>${name}<span class="fc-check">✓</span>`;
+        chip.addEventListener('click', () => {
+          if (S.selectedObjects.has(name)) {
+            S.selectedObjects.delete(name);
+            chip.classList.remove('selected');
+          } else {
+            S.selectedObjects.add(name);
+            chip.classList.add('selected');
+          }
+          updateFilterStatus();
+        });
+        grid.appendChild(chip);
+      });
+    }
+  }
+
+  function updateFilterStatus() {
+    const count = S.selectedObjects.size;
+    const btn = $('btn-filter');
+    if (S.filterMode === 'custom' && count > 0) {
+      btn.classList.add('active');
+      toast(`Measuring ${count} object type${count > 1 ? 's' : ''}`, '', 1200);
+    } else {
+      btn.classList.remove('active');
+    }
+  }
+
+  // Build grid on startup
+  buildFilterGrid();
+
+  // Filter button opens drawer
+  $('btn-filter').addEventListener('click', () => {
+    closeAllDrawers();
+    $('filter-drawer').classList.remove('hidden');
+    $('backdrop').classList.remove('hidden');
+  });
+
+  // Mode buttons
+  $('fmode-all').addEventListener('click', () => {
+    S.filterMode = 'all';
+    $('fmode-all').classList.add('active');
+    $('fmode-custom').classList.remove('active');
+    $('filter-grid').classList.add('hidden');
+    $('btn-filter').classList.remove('active');
+    toast('Measuring all objects', '', 1200);
+  });
+
+  $('fmode-custom').addEventListener('click', () => {
+    S.filterMode = 'custom';
+    $('fmode-custom').classList.add('active');
+    $('fmode-all').classList.remove('active');
+    $('filter-grid').classList.remove('hidden');
+    updateFilterStatus();
+  });
+
+  // Select All / Deselect All
+  $('btn-filter-all').addEventListener('click', () => {
+    const allNames = Object.values(CATEGORIES).flat();
+    if (S.selectedObjects.size === allNames.length) {
+      S.selectedObjects.clear();
+      $('filter-grid').querySelectorAll('.filter-chip').forEach(c => c.classList.remove('selected'));
+    } else {
+      allNames.forEach(n => S.selectedObjects.add(n));
+      $('filter-grid').querySelectorAll('.filter-chip').forEach(c => c.classList.add('selected'));
+    }
+    updateFilterStatus();
+  });
+
+  /* ═══════════════════════════════════
+     ACCURACY TIPS
+  ═══════════════════════════════════ */
+  $('btn-tips').addEventListener('click', () => {
+    closeAllDrawers();
+    $('tips-drawer').classList.remove('hidden');
+    $('backdrop').classList.remove('hidden');
+  });
+
+  $('btn-tips-close').addEventListener('click', () => {
+    $('tips-drawer').classList.add('hidden');
+    $('backdrop').classList.add('hidden');
+  });
+
+  /* ═══════════════════════════════════
+     DRAWER HELPERS
+  ═══════════════════════════════════ */
+  function closeAllDrawers() {
+    $('history-drawer').classList.add('hidden');
+    $('filter-drawer').classList.add('hidden');
+    $('tips-drawer').classList.add('hidden');
+    $('backdrop').classList.add('hidden');
+  }
+
 
   /* ═══════════════════════════════════
      HISTORY

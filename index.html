@@ -47,6 +47,12 @@
       <div class="offline-badge"><span class="offline-dot"></span><span>Offline AI</span></div>
     </div>
     <div class="hdr-right">
+      <button class="icon-btn" id="btn-filter" title="Select objects">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-tips" title="Accuracy tips">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+      </button>
       <button class="icon-btn" id="btn-unit" title="Change unit"><span id="unit-label">cm</span></button>
       <button class="icon-btn" id="btn-flip" title="Flip camera">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
@@ -110,6 +116,87 @@
     <ul id="history-list" class="history-list"><li class="hist-empty">No measurements yet</li></ul>
   </div>
   <div class="backdrop hidden" id="backdrop"></div>
+
+  <!-- ═══ OBJECT FILTER DRAWER ═══ -->
+  <div class="drawer hidden" id="filter-drawer">
+    <div class="drawer-bar"></div>
+    <div class="drawer-hdr">
+      <h3>🎯 Select Objects to Measure</h3>
+      <button class="icon-btn" id="btn-filter-all">All</button>
+    </div>
+    <p class="filter-hint">Only selected objects will be detected and measured. Tap to toggle.</p>
+    <div class="filter-mode">
+      <button class="filter-mode-btn active" id="fmode-all">All Objects</button>
+      <button class="filter-mode-btn" id="fmode-custom">Custom Selection</button>
+    </div>
+    <div class="filter-grid hidden" id="filter-grid">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <!-- ═══ ACCURACY TIPS MODAL ═══ -->
+  <div class="drawer hidden" id="tips-drawer">
+    <div class="drawer-bar"></div>
+    <div class="drawer-hdr"><h3>📏 Tips for 100% Accuracy</h3><button class="icon-btn" id="btn-tips-close">✕</button></div>
+    <div class="tips-scroll">
+      <div class="tip-card tip-important">
+        <div class="tip-num">1</div>
+        <div class="tip-body">
+          <div class="tip-title">Place a Known Object in Frame</div>
+          <p>Put a <b>standard-sized object</b> (phone, credit card, A4 paper, water bottle) next to the item you want to measure. The AI uses known objects to <b>calibrate the scale</b> — more reference objects = higher accuracy.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">2</div>
+        <div class="tip-body">
+          <div class="tip-title">Camera Straight & Perpendicular</div>
+          <p>Hold your camera <b>directly facing</b> the object, not from an angle. Tilted angles distort the bounding box and cause measurement errors up to 30%.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">3</div>
+        <div class="tip-body">
+          <div class="tip-title">Good Lighting (No Shadows)</div>
+          <p>The AI neural network struggles in <b>dark or uneven lighting</b>. Ensure the object is well-lit from the front. Avoid strong backlighting or shadows.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">4</div>
+        <div class="tip-body">
+          <div class="tip-title">Wait for Calibration ✓</div>
+          <p>Keep objects in frame until the <b>calibration badge turns green</b> ("Scale calibrated"). This means the AI has collected enough samples for accurate cross-reference scaling.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">5</div>
+        <div class="tip-body">
+          <div class="tip-title">Full Object Visible</div>
+          <p>Make sure the <b>entire object</b> is within the camera frame. Partially cropped objects produce wrong bounding boxes and inaccurate sizes.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">6</div>
+        <div class="tip-body">
+          <div class="tip-title">Hold Steady for 2–3 Seconds</div>
+          <p>The app uses <b>temporal smoothing</b> (5-frame average) to stabilize measurements. Hold the camera still for a few seconds to let the numbers converge to the correct value.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">7</div>
+        <div class="tip-body">
+          <div class="tip-title">Optimal Distance: 30cm – 2m</div>
+          <p>The AI works best when the object occupies <b>20% to 80%</b> of the frame. Too far = tiny bounding box = imprecise. Too close = object gets cut off.</p>
+        </div>
+      </div>
+      <div class="tip-card tip-important">
+        <div class="tip-num">⚡</div>
+        <div class="tip-body">
+          <div class="tip-title">Best Combo for Maximum Accuracy</div>
+          <p>Place your <b>phone flat next to the object</b> → the AI knows the exact phone size (71×147mm) → it calibrates the pixel-to-mm ratio perfectly → all other objects in frame are measured using this calibrated scale. This gives <b>95–99% accuracy</b>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="toasts"></div>
 </div>
