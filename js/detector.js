@@ -25,6 +25,12 @@ const Detector = (() => {
   const MAX_MISS     = 8;      // keep ghost for 8 frames (~0.3s at 25fps)
   const IOU_THRESH   = 0.25;   // minimum IoU to match detection to track
 
+  // Living creatures excluded from measurement — inanimate objects only
+  const LIVING_THINGS = new Set([
+    'person', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe'
+  ]);
+
   /* ── IoU (Intersection over Union) ── */
   function iou(a, b) {
     const ax1 = a[0], ay1 = a[1], ax2 = a[0] + a[2], ay2 = a[1] + a[3];
@@ -152,7 +158,9 @@ const Detector = (() => {
 
     try {
       const raw = await model.detect(videoEl, 20, confThreshold);
-      updateTracks(raw);
+      // Filter out living things — only measure inanimate objects
+      const filtered = raw.filter(p => !LIVING_THINGS.has(p.class));
+      updateTracks(filtered);
       return getTrackedPreds();
     } catch (err) {
       console.warn('[Detector] Inference warning:', err.message);

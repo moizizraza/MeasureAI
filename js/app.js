@@ -9,6 +9,13 @@
 
 (async () => {
 
+  // Wait for intro screen to be dismissed
+  if (document.getElementById('intro-screen')) {
+    await new Promise(resolve => {
+      window.addEventListener('intro-done', resolve, { once: true });
+    });
+  }
+
   const S = {
     unit:    'cm',
     frozen:  false,
