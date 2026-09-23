@@ -1,9 +1,8 @@
 /* ════════════════════════════════════════════════
-   app.js — High-Response Tap-To-Measure Controller
-   - Screen stays 100% clean (zero boxes on unselected items)
-   - Blazing-fast magnetic touch detection
-   - Guaranteed active FPS counter (never freezes at 0)
-   - 100% precision measurement on tapped objects
+   app.js — Instance-Based Tap-To-Measure
+   - Each specific object instance is tracked independently
+   - Tapping bottle #1 does NOT select bottle #2
+   - Screen stays 100% clean until user taps
    ════════════════════════════════════════════════ */
 
 (async () => {
@@ -13,8 +12,10 @@
     unit:    'cm',
     frozen:  false,
     history: [],
-    lastDetections: [],
-    selectedObjects: new Set(), // User-selected object classes
+    lastDetections: [],  // all detections this frame
+    // Instance-based selection: each entry = { label, cx, cy }
+    // We match by label + spatial proximity each frame
+    selectedInstances: [],
     fps: 0,
   };
 
@@ -49,14 +50,66 @@
     const badge = $('calib-badge');
     const txt   = $('calib-txt');
     if (!badge || !txt) return;
-
     if (info.calibrated) {
       badge.className = 'calib-badge calibrated';
-      txt.textContent = `100% Calibrated · ${info.sampleCount} samples`;
+      txt.textContent = `Calibrated · ${info.sampleCount} samples`;
     } else {
       badge.className = 'calib-badge';
       txt.textContent = 'Calibrating…';
     }
+  }
+
+  /* ── Instance matching: is this detection the same physical object? ── */
+  function instanceMatch(sel, item) {
+    if (sel.label !== item.label) return false;
+    const [bx, by, bw, bh] = item.bbox;
+    const icx = bx + bw / 2;
+    const icy = by + bh / 2;
+    // Allow up to 35% of bbox diagonal drift between frames
+    const diag = Math.hypot(bw, bh);
+    const drift = Math.hypot(icx - sel.cx, icy - sel.cy);
+    return drift < diag * 0.35;
+  }
+
+  function markSelected(items) {
+    // For each selected instance, find the closest matching detection
+    const used = new Set();
+    for (const sel of S.selectedInstances) {
+      let bestIdx = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < items.length; i++) {
+        if (used.has(i)) continue;
+        if (items[i].label !== sel.label) continue;
+        const [bx, by, bw, bh] = items[i].bbox;
+        const d = Math.hypot((bx + bw/2) - sel.cx, (by + bh/2) - sel.cy);
+        const diag = Math.hypot(bw, bh);
+        if (d < diag * 0.5 && d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx >= 0) {
+        items[bestIdx].selected = true;
+        used.add(bestIdx);
+        // Update stored center to follow the object as it moves
+        const [bx, by, bw, bh] = items[bestIdx].bbox;
+        sel.cx = bx + bw / 2;
+        sel.cy = by + bh / 2;
+      }
+    }
+    // Remove any selected instances that weren't matched for 60+ frames
+    // (object left the view)
+    S.selectedInstances = S.selectedInstances.filter(sel => {
+      sel._missFrames = (sel._missFrames || 0);
+      const matched = items.some(it => it.selected && it.label === sel.label &&
+        Math.hypot((it.bbox[0] + it.bbox[2]/2) - sel.cx, (it.bbox[1] + it.bbox[3]/2) - sel.cy) < Math.hypot(it.bbox[2], it.bbox[3]) * 0.5);
+      if (!matched) {
+        sel._missFrames++;
+        return sel._missFrames < 60; // keep for ~2 seconds
+      }
+      sel._missFrames = 0;
+      return true;
+    });
   }
 
   /* ═══════════════════════════════════
@@ -67,10 +120,10 @@
     await Camera.start();
     setProgress('Camera ready ✓', 35);
   } catch (err) {
-    setProgress('⚠️ Camera access denied — please allow camera and reload', 0);
+    setProgress('⚠️ Camera access denied — allow camera and reload', 0);
     const fill = $('loader-fill');
     if (fill) fill.style.background = '#f87171';
-    console.error('[App] Camera start error:', err);
+    console.error('[App] Camera error:', err);
     return;
   }
 
@@ -86,17 +139,17 @@
     modelOk = true;
     setProgress('AI model loaded ✓', 95);
   } catch (err) {
-    setProgress('⚠️ Model failed to load — check connection and reload', 0);
+    setProgress('⚠️ Model failed — check connection and reload', 0);
     const fill = $('loader-fill');
     if (fill) fill.style.background = '#f87171';
-    console.error('[App] Detector load error:', err);
+    console.error('[App] Detector error:', err);
     await new Promise(r => setTimeout(r, 2000));
   }
 
   /* ═══════════════════════════════════
-     STEP 3 — Reveal Viewport
+     STEP 3 — Reveal App
   ═══════════════════════════════════ */
-  setProgress('Launching MeasureAI…', 100);
+  setProgress('Launching…', 100);
   await new Promise(r => setTimeout(r, 350));
 
   $('loading-screen').classList.add('hidden');
@@ -104,78 +157,78 @@
 
   if (!modelOk) {
     setStatus('Model not loaded', 'error');
-    toast('Vision model failed to load. Please reload.', 'e', 8000);
+    toast('Vision model failed. Please reload.', 'e', 8000);
     return;
   }
 
   setStatus('Point camera & tap any object', 'live');
 
   /* ═══════════════════════════════════
-     STEP 4 — Real-Time Detection Loop
+     STEP 4 — Detection Loop
   ═══════════════════════════════════ */
   const { w: vidW, h: vidH } = Camera.getDims();
-
-  let frameCount = 0;
-  let fpsTimer = performance.now();
+  let fc = 0;
+  let fpsT = performance.now();
 
   Detector.startLoop(preds => {
     if (S.frozen) return;
 
-    // Accurate rolling FPS
-    frameCount++;
+    // FPS counter
+    fc++;
     const now = performance.now();
-    if (now - fpsTimer >= 500) {
-      S.fps = Math.round((frameCount * 1000) / (now - fpsTimer));
-      const fpsChip = $('fps-chip');
-      if (fpsChip) fpsChip.textContent = `${Math.max(1, S.fps)} fps`;
-      frameCount = 0;
-      fpsTimer = now;
+    if (now - fpsT >= 500) {
+      S.fps = Math.round((fc * 1000) / (now - fpsT));
+      const chip = $('fps-chip');
+      if (chip) chip.textContent = `${Math.max(1, S.fps)} fps`;
+      fc = 0;
+      fpsT = now;
     }
 
-    // Auto-calibration in background using all objects in view
+    // Background calibration
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
-    // Map detections with measurements
+    // Build items — all start as selected: false
     const items = preds.map(pred => ({
       label:       pred.class,
       bbox:        pred.bbox,
       score:       pred.score,
-      selected:    S.selectedObjects.has(pred.class),
+      selected:    false,
       measurement: MeasureEngine.measure(pred, w || vidW, h || vidH),
     }));
 
+    // Mark only the specific instances the user tapped
+    markSelected(items);
+
     S.lastDetections = items;
 
-    // Draw: Renderer ONLY draws objects where selected === true!
-    // Screen remains 100% clean and free of unselected clutter.
+    // Renderer ONLY draws items where selected === true
     Renderer.draw(items, S.unit);
 
-    // Update bottom measurement cards: ONLY show selected objects!
-    const selectedMeasurements = items.filter(m => m.selected);
-    renderCards(selectedMeasurements);
+    // Bottom cards — only selected
+    const sel = items.filter(m => m.selected);
+    renderCards(sel);
 
-    // Status bar updates
-    if (selectedMeasurements.length > 0) {
-      const names = selectedMeasurements.map(m => m.label).join(', ');
-      setStatus(`Measuring: ${names}`, 'live');
+    // Status
+    if (sel.length > 0) {
+      setStatus(`Measuring: ${sel.map(m => m.label).join(', ')}`, 'live');
     } else if (preds.length > 0) {
-      setStatus(`Tap any object on screen to measure`, 'live');
+      setStatus('Tap any object to measure', 'live');
     } else {
-      setStatus(`Scanning for objects…`, 'live');
+      setStatus('Scanning for objects…', 'live');
     }
   });
 
   /* ═══════════════════════════════════
-     HIGH-RESPONSE TAP-TO-MEASURE
+     TAP-TO-MEASURE (Instance-Based)
   ═══════════════════════════════════ */
   let lastTapTs = 0;
 
   function handleTap(e) {
     if (S.frozen) return;
 
-    // Debounce to prevent double-execution from touchend + click
+    // Debounce touch+click double-fire
     const now = performance.now();
     if (now - lastTapTs < 350) return;
     lastTapTs = now;
@@ -183,52 +236,63 @@
     const vp = $('viewport');
     const rect = vp.getBoundingClientRect();
 
-    let clientX, clientY;
+    let cx, cy;
     if (e.changedTouches && e.changedTouches.length > 0) {
-      clientX = e.changedTouches[0].clientX;
-      clientY = e.changedTouches[0].clientY;
+      cx = e.changedTouches[0].clientX;
+      cy = e.changedTouches[0].clientY;
     } else if (e.touches && e.touches.length > 0) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
+      cx = e.touches[0].clientX;
+      cy = e.touches[0].clientY;
     } else {
-      clientX = e.clientX;
-      clientY = e.clientY;
+      cx = e.clientX;
+      cy = e.clientY;
     }
 
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
+    const px = cx - rect.left;
+    const py = cy - rect.top;
 
-    // High-response hit test (direct hit + 90px magnetic snap)
+    // Hit test — find the EXACT object tapped (strict, no magnetic snap to other objects)
     const hit = Renderer.hitTest(S.lastDetections, px, py);
 
     if (hit) {
-      try { navigator.vibrate?.(35); } catch {}
+      try { navigator.vibrate?.(30); } catch {}
 
-      if (S.selectedObjects.has(hit.label)) {
-        // Tapped already selected object → deselect it
-        S.selectedObjects.delete(hit.label);
+      const [bx, by, bw, bh] = hit.bbox;
+      const hitCx = bx + bw / 2;
+      const hitCy = by + bh / 2;
+
+      // Check if this specific instance is already selected
+      const existingIdx = S.selectedInstances.findIndex(sel =>
+        sel.label === hit.label && instanceMatch(sel, hit)
+      );
+
+      if (existingIdx >= 0) {
+        // Already selected → deselect THIS instance only
+        S.selectedInstances.splice(existingIdx, 1);
         toast(`Deselected: ${hit.label}`, '', 1200);
       } else {
-        // Tapped new object → lock on and measure!
-        S.selectedObjects.add(hit.label);
+        // Select THIS specific instance
+        S.selectedInstances.push({
+          label: hit.label,
+          cx: hitCx,
+          cy: hitCy,
+          _missFrames: 0,
+        });
         const meas = hit.measurement;
         const wStr = MeasureEngine.format(meas.widthMm, S.unit);
         const hStr = MeasureEngine.format(meas.heightMm, S.unit);
         toast(`📏 ${hit.label}: ${wStr} × ${hStr}`, 's', 2500);
       }
     } else {
-      // Tapped empty space → clear active selections
-      if (S.selectedObjects.size > 0) {
-        S.selectedObjects.clear();
+      // Tapped empty space → clear all
+      if (S.selectedInstances.length > 0) {
+        S.selectedInstances = [];
         toast('Selection cleared', '', 1000);
       }
     }
   }
 
-  // Bind high-response tap listener to viewport
   const vpEl = $('viewport');
-  vpEl.style.cursor = 'pointer';
-  vpEl.style.touchAction = 'manipulation';
   vpEl.addEventListener('click', handleTap);
   vpEl.addEventListener('touchend', handleTap, { passive: true });
 
@@ -238,7 +302,6 @@
   function renderCards(measurements) {
     const scroll = $('results-scroll');
     const ph     = $('result-placeholder');
-
     if (!scroll || !ph) return;
 
     if (measurements.length === 0) {
@@ -249,14 +312,15 @@
 
     ph.classList.add('hidden');
 
-    // Remove cards for objects no longer selected
+    // Build unique card IDs from label + index
     const existing = [...scroll.querySelectorAll('.mcard')];
-    const labels   = measurements.map(m => m.label);
+    const cardKeys = measurements.map((m, i) => `${m.label}-${i}`);
     existing.forEach(card => {
-      if (!labels.includes(card.dataset.label)) card.remove();
+      if (!cardKeys.includes(card.dataset.key)) card.remove();
     });
 
-    measurements.forEach(m => {
+    measurements.forEach((m, i) => {
+      const key     = `${m.label}-${i}`;
       const meas    = m.measurement;
       const wLbl    = MeasureEngine.format(meas.widthMm,  S.unit);
       const hLbl    = MeasureEngine.format(meas.heightMm, S.unit);
@@ -264,16 +328,12 @@
       const confPct = Math.round(m.score * 100);
       const confCls = confPct >= 70 ? 'high' : confPct >= 45 ? 'med' : 'low';
 
-      let card = scroll.querySelector(`.mcard[data-label="${m.label}"]`);
+      let card = scroll.querySelector(`.mcard[data-key="${key}"]`);
       if (!card) {
         card = document.createElement('div');
         card.className = 'mcard';
+        card.dataset.key = key;
         card.dataset.label = m.label;
-        card.title = 'Tap to remove measurement';
-        card.addEventListener('click', () => {
-          S.selectedObjects.delete(m.label);
-          toast(`Removed ${m.label}`, '', 1200);
-        });
         scroll.appendChild(card);
       }
 
@@ -282,7 +342,7 @@
           <span class="mcard-emoji">${meas.emoji}</span>
           <span class="mcard-conf-chip ${confCls}">${confPct}%</span>
         </div>
-        <div class="mcard-label">${m.label} <span style="font-size:.65rem;color:var(--txt3);">(tap to close)</span></div>
+        <div class="mcard-label">${m.label}</div>
         <div class="mcard-dims">
           <div class="mcard-dim"><span class="dim-lbl">W</span>${wLbl}</div>
           <div class="mcard-dim"><span class="dim-lbl">H</span>${hLbl}</div>
@@ -293,16 +353,15 @@
   }
 
   /* ═══════════════════════════════════
-     HEADER & FOOTER BUTTONS
+     CONTROLS
   ═══════════════════════════════════ */
 
-  // Unit toggle: cm → in → mm
+  // Unit toggle
   $('btn-unit').addEventListener('click', () => {
     const units = ['cm', 'in', 'mm'];
     S.unit = units[(units.indexOf(S.unit) + 1) % units.length];
     $('unit-label').textContent = S.unit;
     toast(`Unit: ${S.unit}`, '', 1200);
-    if (S.lastDetections.length) Renderer.draw(S.lastDetections, S.unit);
   });
 
   // Flip Camera
@@ -311,6 +370,7 @@
     try {
       await Camera.flip();
       MeasureEngine.reset();
+      S.selectedInstances = [];
       setStatus('Point camera & tap any object', 'live');
       toast('Camera flipped', '', 1200);
     } catch {
@@ -322,7 +382,6 @@
   // Freeze / Resume
   $('btn-freeze').addEventListener('click', toggleFreeze);
   $('freeze-overlay').addEventListener('click', toggleFreeze);
-
   function toggleFreeze() {
     S.frozen = !S.frozen;
     $('freeze-overlay').classList.toggle('hidden', !S.frozen);
@@ -331,7 +390,6 @@
       Detector.pause();
       ico.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
       setStatus('Frozen', 'paused');
-      toast('Paused — tap screen to resume', 'w', 2000);
     } else {
       Detector.resume();
       ico.innerHTML = `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`;
@@ -339,90 +397,58 @@
     }
   }
 
-  // Capture snapshot
+  // Capture
   $('btn-capture').addEventListener('click', () => {
-    const selected = S.lastDetections.filter(m => m.selected);
-    if (selected.length === 0) {
-      toast('Tap an object first to measure and capture!', 'w', 2500);
-      return;
-    }
+    const sel = S.lastDetections.filter(m => m.selected);
+    if (sel.length === 0) { toast('Tap an object first!', 'w', 2000); return; }
     const img = Renderer.snapshot();
     saveHistory(img);
     flashEffect();
-    toast('📸 Saved to history!', 's', 2000);
+    toast('📸 Saved!', 's', 1500);
   });
 
-  // Clear / Reset selection
+  // Clear all
   $('btn-reset').addEventListener('click', () => {
-    S.selectedObjects.clear();
+    S.selectedInstances = [];
     MeasureEngine.reset();
     updateCalibBadge();
-    toast('Cleared all measurements', '', 1500);
+    toast('Cleared', '', 1200);
   });
 
   // Drawers
-  $('btn-history').addEventListener('click', () => {
-    closeDrawers();
-    $('history-drawer').classList.remove('hidden');
-    $('backdrop').classList.remove('hidden');
-  });
-
-  $('btn-tips').addEventListener('click', () => {
-    closeDrawers();
-    $('tips-drawer').classList.remove('hidden');
-    $('backdrop').classList.remove('hidden');
-  });
-
+  $('btn-history').addEventListener('click', () => { closeDrawers(); $('history-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
+  $('btn-tips').addEventListener('click', () => { closeDrawers(); $('tips-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
   $('btn-tips-close').addEventListener('click', closeDrawers);
   $('backdrop').addEventListener('click', closeDrawers);
-
-  function closeDrawers() {
-    $('history-drawer').classList.add('hidden');
-    $('tips-drawer').classList.add('hidden');
-    $('backdrop').classList.add('hidden');
-  }
-
-  $('btn-clear').addEventListener('click', () => {
-    S.history = [];
-    $('history-list').innerHTML = '<li class="hist-empty">No measurements yet</li>';
-    toast('History cleared', '', 1200);
-  });
+  function closeDrawers() { $('history-drawer').classList.add('hidden'); $('tips-drawer').classList.add('hidden'); $('backdrop').classList.add('hidden'); }
+  $('btn-clear').addEventListener('click', () => { S.history = []; $('history-list').innerHTML = '<li class="hist-empty">No measurements yet</li>'; toast('History cleared', '', 1200); });
 
   window.addEventListener('resize', () => Renderer.syncSize());
 
   /* ═══════════════════════════════════
-     SNAPSHOT HISTORY
+     HISTORY & FLASH
   ═══════════════════════════════════ */
   function saveHistory(imgUrl) {
     const ts  = new Date();
     const top = S.lastDetections.find(m => m.selected) || S.lastDetections[0];
     S.history.unshift({ img: imgUrl, meas: S.lastDetections, ts });
-
     const hl = $('history-list');
     const empty = hl.querySelector('.hist-empty');
     if (empty) empty.remove();
-
-    const wLbl = top ? MeasureEngine.format(top.measurement.widthMm,  S.unit) : '—';
+    const wLbl = top ? MeasureEngine.format(top.measurement.widthMm, S.unit) : '—';
     const hLbl = top ? MeasureEngine.format(top.measurement.heightMm, S.unit) : '—';
-
     const li = document.createElement('li');
     li.className = 'hist-item';
-    li.innerHTML = `
-      <img class="hist-thumb" src="${imgUrl}" alt="snapshot" />
-      <div class="hist-info">
-        <div class="hist-label">${top ? top.measurement.emoji + ' ' + top.label : 'Snapshot'}</div>
-        <div class="hist-dims">${wLbl} × ${hLbl}</div>
-        <div class="hist-time">${ts.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>
-      </div>`;
+    li.innerHTML = `<img class="hist-thumb" src="${imgUrl}" alt="snap"/><div class="hist-info"><div class="hist-label">${top ? top.measurement.emoji + ' ' + top.label : 'Snap'}</div><div class="hist-dims">${wLbl} × ${hLbl}</div><div class="hist-time">${ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div></div>`;
     hl.prepend(li);
   }
 
   function flashEffect() {
     const el = document.createElement('div');
-    el.style.cssText = `position:fixed;inset:0;z-index:99;background:rgba(255,255,255,.2);pointer-events:none;transition:opacity .35s;`;
+    el.style.cssText = 'position:fixed;inset:0;z-index:99;background:rgba(255,255,255,.2);pointer-events:none;transition:opacity .35s;';
     document.body.appendChild(el);
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ High-response tap-to-measure active');
+  console.log('[MeasureAI] ✓ Instance-based tap-to-measure ready');
 })();

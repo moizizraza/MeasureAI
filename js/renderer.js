@@ -225,33 +225,20 @@ const Renderer = (() => {
     ctx.restore();
   }
 
-  /* ── Ultra-Responsive Magnetic Hit-Testing ── */
+  /* ── Strict Hit-Testing: only the EXACT tapped object ── */
   function hitTest(items, px, py) {
     if (!items || items.length === 0) return null;
 
-    // 1. Direct hit with generous 28px finger padding
+    // Direct bbox hit with 20px finger padding — no magnetic snap
     for (let i = items.length - 1; i >= 0; i--) {
       const [cx, cy, cw, ch] = toCanvas(items[i].bbox);
-      const pad = 28;
+      const pad = 20;
       if (px >= cx - pad && px <= cx + cw + pad && py >= cy - pad && py <= cy + ch + pad) {
         return items[i];
       }
     }
 
-    // 2. Magnetic nearest hit within 90px radius
-    let closest = null;
-    let minDist = 90;
-    for (const item of items) {
-      const [cx, cy, cw, ch] = toCanvas(item.bbox);
-      const midX = cx + cw / 2;
-      const midY = cy + ch / 2;
-      const dist = Math.hypot(px - midX, py - midY);
-      if (dist < minDist) {
-        minDist = dist;
-        closest = item;
-      }
-    }
-    return closest;
+    return null;
   }
 
   function snapshot() {
