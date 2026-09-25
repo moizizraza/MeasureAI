@@ -1,9 +1,10 @@
 /* ════════════════════════════════════════════════════════
-   app.js — AI + Manual Measurement Controller
+   app.js — AI + Manual Multi-Point Measurement
    
    Two modes:
    - Auto: AI detects objects, tap to measure
-   - Manual A→B: tap two points to measure any distance
+   - Manual: Continuous multi-point measurement (like Apple Measure)
+     tap point after point to measure along any path/shape
    ════════════════════════════════════════════════════════ */
 
 (async () => {
@@ -22,10 +23,10 @@
     lastDetections: [],
     selectedTrackIds: new Set(),
     fps: 0,
-    mode: 'auto',              // 'auto' or 'manual'
-    manualA: null,             // { x, y } in canvas coords
-    manualB: null,             // { x, y } in canvas coords
-    manualMeasurement: null,   // formatted string
+    mode: 'auto',           // 'auto' or 'manual'
+    manualPoints: [],       // [{ x, y }, ...] in canvas coords
+    manualSegments: [],     // ['3.2 cm', '5.1 cm', ...] per segment
+    manualTotal: null,      // '8.3 cm' total distance
   };
 
   const $ = id => document.getElementById(id);
@@ -64,6 +65,35 @@
     } else {
       badge.className = 'calib-badge';
       txt.textContent = 'Calibrating…';
+    }
+  }
+
+  /* ── Recalculate all manual segments ── */
+  function recalcManual() {
+    const info = MeasureEngine.getCalibrationInfo();
+    const pts = S.manualPoints;
+    S.manualSegments = [];
+    let totalMm = 0;
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const distPx = Math.hypot(pts[i+1].x - pts[i].x, pts[i+1].y - pts[i].y);
+      if (info.calibrated && info.pxPerMm > 0) {
+        const mm = distPx / info.pxPerMm;
+        totalMm += mm;
+        S.manualSegments.push(MeasureEngine.format(mm, S.unit));
+      } else {
+        S.manualSegments.push(`${Math.round(distPx)}px`);
+      }
+    }
+
+    if (pts.length >= 2) {
+      if (info.calibrated && info.pxPerMm > 0) {
+        S.manualTotal = MeasureEngine.format(totalMm, S.unit);
+      } else {
+        S.manualTotal = 'Uncalibrated';
+      }
+    } else {
+      S.manualTotal = null;
     }
   }
 
@@ -130,7 +160,7 @@
       fc = 0; fpsT = now;
     }
 
-    // Calibrate (always runs — needed for manual mode too)
+    // Calibrate (always runs for both modes)
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
@@ -154,19 +184,16 @@
 
     S.lastDetections = items;
 
-    // Draw AI detections (only selected ones shown)
+    // Draw AI detections
     Renderer.draw(items, S.unit);
 
-    // Draw manual measurement overlay
-    if (S.mode === 'manual') {
-      if (S.manualA && S.manualB) {
-        Renderer.drawManualLine(S.manualA, S.manualB, S.manualMeasurement, '#fbbf24');
-      } else if (S.manualA) {
-        Renderer.drawPointA(S.manualA, '#fbbf24');
-      }
+    // Draw manual multi-point overlay
+    if (S.mode === 'manual' && S.manualPoints.length > 0) {
+      recalcManual(); // live recalc as calibration improves
+      Renderer.drawMultiPoints(S.manualPoints, S.manualSegments, S.manualTotal, '#fbbf24');
     }
 
-    // Cards (auto mode only)
+    // Cards
     const sel = items.filter(m => m.selected);
     if (S.mode === 'auto') {
       renderCards(sel);
@@ -176,12 +203,13 @@
 
     // Status
     if (S.mode === 'manual') {
-      if (S.manualA && S.manualB) {
-        setStatus(`Manual: ${S.manualMeasurement || '—'}`, 'live');
-      } else if (S.manualA) {
-        setStatus('Tap Point B', 'live');
+      const n = S.manualPoints.length;
+      if (n >= 2) {
+        setStatus(`${n} points · ${S.manualTotal || '—'}`, 'live');
+      } else if (n === 1) {
+        setStatus('Tap next point to measure', 'live');
       } else {
-        setStatus('Tap Point A on screen', 'live');
+        setStatus('Tap to place first point', 'live');
       }
     } else if (sel.length > 0) {
       const info = sel.map(m => `${m.label}${m.age >= 15 ? ' ✓' : ''}`).join(', ');
@@ -194,14 +222,14 @@
   });
 
   /* ═══════════════════════════════════
-     TAP HANDLER (Auto + Manual)
+     TAP HANDLER
   ═══════════════════════════════════ */
   let lastTapTs = 0;
 
   function handleTap(e) {
     if (S.frozen) return;
     const now = performance.now();
-    if (now - lastTapTs < 350) return;
+    if (now - lastTapTs < 300) return;
     lastTapTs = now;
 
     const rect = $('viewport').getBoundingClientRect();
@@ -216,36 +244,24 @@
 
     const px = cx - rect.left, py = cy - rect.top;
 
-    // ── Manual mode: A→B point measurement ──
+    // ── Manual mode: add point ──
     if (S.mode === 'manual') {
-      try { navigator.vibrate?.(30); } catch {}
+      try { navigator.vibrate?.(25); } catch {}
 
-      if (!S.manualA) {
-        S.manualA = { x: px, y: py };
-        S.manualB = null;
-        S.manualMeasurement = null;
-        toast('Point A set — now tap Point B', 's', 2000);
-      } else if (!S.manualB) {
-        S.manualB = { x: px, y: py };
-        const distPx = Math.hypot(S.manualB.x - S.manualA.x, S.manualB.y - S.manualA.y);
-        const info = MeasureEngine.getCalibrationInfo();
-        if (info.calibrated && info.pxPerMm > 0) {
-          const mm = distPx / info.pxPerMm;
-          S.manualMeasurement = MeasureEngine.format(mm, S.unit);
-          toast(`📐 Manual: ${S.manualMeasurement}`, 's', 3000);
-        } else {
-          S.manualMeasurement = `${Math.round(distPx)}px (uncalibrated)`;
-          toast('⚠️ Place a known object in view for accuracy', 'w', 3000);
-        }
+      S.manualPoints.push({ x: px, y: py });
+      recalcManual();
+
+      const n = S.manualPoints.length;
+      if (n === 1) {
+        toast('Point 1 set — keep tapping', 's', 1500);
       } else {
-        // Third tap = reset
-        S.manualA = null; S.manualB = null; S.manualMeasurement = null;
-        toast('Manual cleared — tap Point A', '', 1200);
+        const lastSeg = S.manualSegments[S.manualSegments.length - 1];
+        toast(`📐 Segment ${n-1}: ${lastSeg}`, 's', 2000);
       }
       return;
     }
 
-    // ── Auto mode: AI tap-to-measure ──
+    // ── Auto mode ──
     const hit = Renderer.hitTest(S.lastDetections, px, py);
 
     if (hit) {
@@ -294,11 +310,9 @@
       const meas = m.measurement;
       const wLbl = MeasureEngine.format(meas.widthMm, S.unit);
       const hLbl = MeasureEngine.format(meas.heightMm, S.unit);
-      const dist = meas.distanceCm ? MeasureEngine.formatDist(meas.distanceCm) : null;
       const conf = Math.round(m.score * 100);
       const cls  = conf >= 70 ? 'high' : conf >= 45 ? 'med' : 'low';
       const locked = m.age >= 15;
-      const lockIcon = locked ? '🔒' : `⏳ ${Math.min(m.age, 15)}/15`;
 
       let card = scroll.querySelector(`.mcard[data-key="${key}"]`);
       if (!card) {
@@ -312,13 +326,12 @@
         <div class="mcard-hdr">
           <span class="mcard-emoji">${meas.emoji}</span>
           <span class="mcard-conf-chip ${cls}">${conf}%</span>
-          <span class="mcard-lock" style="font-size:.6rem;margin-left:auto;">${lockIcon}</span>
+          <span class="mcard-lock" style="font-size:.6rem;margin-left:auto;">${locked ? '🔒' : `⏳ ${Math.min(m.age,15)}/15`}</span>
         </div>
-        <div class="mcard-label">${m.label}${locked ? ' <span style="color:var(--a);font-size:.65rem;">Precision Locked ✓</span>' : ''}</div>
+        <div class="mcard-label">${m.label}${locked ? ' <span style="color:var(--a);font-size:.65rem;">Locked ✓</span>' : ''}</div>
         <div class="mcard-dims">
           <div class="mcard-dim"><span class="dim-lbl">W</span>${wLbl}</div>
           <div class="mcard-dim"><span class="dim-lbl">H</span>${hLbl}</div>
-          ${dist ? `<div class="mcard-dim" style="color:var(--txt2);font-size:.68rem"><span class="dim-lbl">📏</span>${dist}</div>` : ''}
         </div>
       `;
     });
@@ -328,13 +341,14 @@
     const scroll = $('results-scroll'), ph = $('result-placeholder');
     if (!scroll || !ph) return;
 
-    // Remove AI cards
     scroll.querySelectorAll('.mcard:not([data-key="manual"])').forEach(c => c.remove());
 
-    if (!S.manualA || !S.manualB || !S.manualMeasurement) {
+    if (S.manualPoints.length < 2) {
       scroll.querySelector('.mcard[data-key="manual"]')?.remove();
       ph.classList.remove('hidden');
-      ph.querySelector('span').textContent = S.manualA ? 'Tap Point B on screen' : 'Tap Point A on screen';
+      const hint = S.manualPoints.length === 0 ? 'Tap to place first point' : 'Tap next point to measure';
+      const sp = ph.querySelector('span');
+      if (sp) sp.textContent = hint;
       return;
     }
 
@@ -348,15 +362,17 @@
       scroll.appendChild(card);
     }
 
+    const segHtml = S.manualSegments.map((s, i) =>
+      `<div class="mcard-dim"><span class="dim-lbl">${i+1}</span>${s}</div>`
+    ).join('');
+
     card.innerHTML = `
       <div class="mcard-hdr">
         <span class="mcard-emoji">📐</span>
-        <span class="mcard-conf-chip med">A→B</span>
+        <span class="mcard-conf-chip med">${S.manualPoints.length} pts</span>
       </div>
-      <div class="mcard-label">Manual Measurement</div>
-      <div class="mcard-dims">
-        <div class="mcard-dim"><span class="dim-lbl">📏</span>${S.manualMeasurement}</div>
-      </div>
+      <div class="mcard-label">Manual · Total: <b>${S.manualTotal || '—'}</b></div>
+      <div class="mcard-dims">${segHtml}</div>
     `;
   }
 
@@ -364,23 +380,30 @@
      CONTROLS
   ═══════════════════════════════════ */
 
-  // Mode toggle: Auto ↔ Manual
+  // Mode toggle
   $('btn-mode').addEventListener('click', () => {
     if (S.mode === 'auto') {
       S.mode = 'manual';
-      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
       S.selectedTrackIds.clear();
       $('mode-label').textContent = 'A→B';
       $('btn-mode').classList.add('mode-active');
-      toast('Manual mode: Tap Point A', 's', 2000);
-      setStatus('Tap Point A on screen', 'live');
+      toast('Manual mode — tap points to measure', 's', 2000);
     } else {
       S.mode = 'auto';
-      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
       $('mode-label').textContent = 'Auto';
       $('btn-mode').classList.remove('mode-active');
       toast('AI Auto mode', '', 1500);
-      setStatus('Tap any object to measure', 'live');
+    }
+  });
+
+  // Undo last point (long press Clear in manual mode)
+  $('btn-undo')?.addEventListener('click', () => {
+    if (S.mode === 'manual' && S.manualPoints.length > 0) {
+      S.manualPoints.pop();
+      recalcManual();
+      toast(`Undo — ${S.manualPoints.length} points`, '', 1200);
     }
   });
 
@@ -390,14 +413,7 @@
     S.unit = u[(u.indexOf(S.unit)+1) % u.length];
     $('unit-label').textContent = S.unit;
     toast(`Unit: ${S.unit}`, '', 1200);
-    // Recalculate manual measurement if exists
-    if (S.mode === 'manual' && S.manualA && S.manualB) {
-      const distPx = Math.hypot(S.manualB.x - S.manualA.x, S.manualB.y - S.manualA.y);
-      const info = MeasureEngine.getCalibrationInfo();
-      if (info.calibrated && info.pxPerMm > 0) {
-        S.manualMeasurement = MeasureEngine.format(distPx / info.pxPerMm, S.unit);
-      }
-    }
+    if (S.mode === 'manual') recalcManual();
   });
 
   // Flip camera
@@ -407,12 +423,12 @@
       await Camera.flip();
       MeasureEngine.reset(); Detector.resetTracks();
       S.selectedTrackIds.clear();
-      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
       setStatus('Point camera & tap any object', 'live');
     } catch { toast('Cannot flip', 'e'); }
   });
 
-  // Freeze / Resume
+  // Freeze
   $('btn-freeze').addEventListener('click', toggleFreeze);
   $('freeze-overlay').addEventListener('click', toggleFreeze);
   function toggleFreeze() {
@@ -425,16 +441,20 @@
 
   // Capture
   $('btn-capture').addEventListener('click', () => {
-    const hasMeas = S.lastDetections.some(m => m.selected) || (S.mode === 'manual' && S.manualMeasurement);
+    const hasMeas = S.lastDetections.some(m => m.selected) || (S.mode === 'manual' && S.manualPoints.length >= 2);
     if (!hasMeas) { toast('Measure something first!', 'w', 2000); return; }
     saveHistory(Renderer.snapshot()); flashEffect(); toast('📸 Saved!', 's', 1500);
   });
 
-  // Clear
+  // Clear / Reset
   $('btn-reset').addEventListener('click', () => {
-    S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
-    S.manualA = null; S.manualB = null; S.manualMeasurement = null;
-    updateCalibBadge(); toast('Cleared', '', 1200);
+    if (S.mode === 'manual') {
+      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
+      toast('Points cleared', '', 1200);
+    } else {
+      S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
+      updateCalibBadge(); toast('Cleared', '', 1200);
+    }
   });
 
   // Drawers
@@ -453,11 +473,12 @@
   function saveHistory(imgUrl) {
     const ts = new Date();
     const top = S.lastDetections.find(m => m.selected) || S.lastDetections[0];
-    S.history.unshift({ img: imgUrl, meas: S.lastDetections, ts });
+    S.history.unshift({ img: imgUrl, ts });
     const hl = $('history-list'), empty = hl.querySelector('.hist-empty');
     if (empty) empty.remove();
-    const label = S.mode === 'manual' ? `📐 Manual: ${S.manualMeasurement}` : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
-    const dims = S.mode === 'manual' ? S.manualMeasurement : (top ? `${MeasureEngine.format(top.measurement.widthMm, S.unit)} × ${MeasureEngine.format(top.measurement.heightMm, S.unit)}` : '—');
+    const label = S.mode === 'manual' ? `📐 Manual: ${S.manualTotal}` : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
+    const dims = S.mode === 'manual' ? `${S.manualPoints.length} points · ${S.manualTotal}` :
+      (top ? `${MeasureEngine.format(top.measurement.widthMm, S.unit)} × ${MeasureEngine.format(top.measurement.heightMm, S.unit)}` : '—');
     const li = document.createElement('li');
     li.className = 'hist-item';
     li.innerHTML = `<img class="hist-thumb" src="${imgUrl}" alt="snap"/><div class="hist-info"><div class="hist-label">${label}</div><div class="hist-dims">${dims}</div><div class="hist-time">${ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div></div>`;
@@ -471,5 +492,5 @@
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ AI + Manual measurement ready');
+  console.log('[MeasureAI] ✓ AI + Multi-Point Manual measurement ready');
 })();

@@ -263,60 +263,92 @@ const Renderer = (() => {
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  /* ── Manual A→B measurement line ── */
-  function drawManualLine(ptA, ptB, label, color) {
-    if (!ptA) return;
+  /* ── Multi-Point Continuous Measurement ── */
+  function drawMultiPoints(points, segments, total, color) {
+    if (!points || points.length === 0) return;
     ctx.save();
-    // Point A
-    ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 15;
-    ctx.beginPath(); ctx.arc(ptA.x, ptA.y, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ptA.x, ptA.y, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0; ctx.font = '700 11px Inter, sans-serif';
-    ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.fillText('A', ptA.x, ptA.y - 14);
 
-    if (ptB) {
-      // Point B
-      ctx.shadowColor = color; ctx.shadowBlur = 15; ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(ptB.x, ptB.y, 8, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ptB.x, ptB.y, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0; ctx.fillStyle = color; ctx.fillText('B', ptB.x, ptB.y - 14);
+    // Draw all segments
+    for (let i = 0; i < points.length; i++) {
+      const pt = points[i];
 
-      // Connecting line
-      ctx.strokeStyle = color; ctx.lineWidth = 2;
-      ctx.shadowColor = color; ctx.shadowBlur = 10;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath(); ctx.moveTo(ptA.x, ptA.y); ctx.lineTo(ptB.x, ptB.y); ctx.stroke();
-      ctx.setLineDash([]); ctx.shadowBlur = 0;
+      // Glowing point marker
+      ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 14;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, i === 0 ? 9 : 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2); ctx.fill();
 
-      // Measurement label at midpoint
-      if (label) {
-        const mx = (ptA.x + ptB.x) / 2, my = (ptA.y + ptB.y) / 2;
-        ctx.font = '700 13px JetBrains Mono, monospace';
-        const tw = ctx.measureText(label).width;
-        const pw = tw + 16, ph = 24;
-        ctx.fillStyle = 'rgba(4,6,14,.92)';
-        ctx.beginPath();
-        if (ctx.roundRect) ctx.roundRect(mx - pw/2, my - ph/2 - 16, pw, ph, 6);
-        else ctx.rect(mx - pw/2, my - ph/2 - 16, pw, ph);
-        ctx.fill();
-        ctx.strokeStyle = hexRgba(color, 0.7); ctx.lineWidth = 1.5; ctx.stroke();
-        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(label, mx, my - 16);
+      // Point label
+      ctx.font = '700 10px Inter, sans-serif';
+      ctx.fillStyle = i === 0 ? '#fff' : color;
+      ctx.textAlign = 'center';
+      ctx.fillText(String(i + 1), pt.x, pt.y - 14);
+
+      // Connecting line to next point
+      if (i < points.length - 1) {
+        const next = points[i + 1];
+        ctx.strokeStyle = color; ctx.lineWidth = 2;
+        ctx.shadowColor = color; ctx.shadowBlur = 8;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath(); ctx.moveTo(pt.x, pt.y); ctx.lineTo(next.x, next.y); ctx.stroke();
+        ctx.setLineDash([]); ctx.shadowBlur = 0;
+
+        // Segment measurement label
+        if (segments && segments[i]) {
+          const mx = (pt.x + next.x) / 2;
+          const my = (pt.y + next.y) / 2;
+          const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
+          const offsetX = Math.sin(angle) * 16;
+          const offsetY = -Math.cos(angle) * 16;
+
+          ctx.font = '700 11px JetBrains Mono, monospace';
+          const tw = ctx.measureText(segments[i]).width;
+          const pw = tw + 12, ph = 18;
+          const lx = mx + offsetX, ly = my + offsetY;
+
+          ctx.fillStyle = 'rgba(4,6,14,.9)';
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(lx - pw/2, ly - ph/2, pw, ph, 4);
+          else ctx.rect(lx - pw/2, ly - ph/2, pw, ph);
+          ctx.fill();
+          ctx.strokeStyle = hexRgba(color, 0.5); ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(segments[i], lx, ly);
+        }
       }
     }
+
+    // Total measurement pill (top of viewport)
+    if (total && points.length >= 2) {
+      ctx.font = '700 14px JetBrains Mono, monospace';
+      const label = `Total: ${total}`;
+      const tw = ctx.measureText(label).width;
+      const pw = tw + 20, ph = 28;
+      const tx = canvas.width / 2, ty = 50;
+
+      ctx.fillStyle = 'rgba(4,6,14,.92)';
+      ctx.shadowColor = color; ctx.shadowBlur = 15;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(tx - pw/2, ty - ph/2, pw, ph, 8);
+      else ctx.rect(tx - pw/2, ty - ph/2, pw, ph);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, tx, ty);
+    }
+
+    // Hint: if only 1 point, show pulsing ring
+    if (points.length === 1) {
+      const pt = points[0];
+      const pulse = (Math.sin(Date.now() / 300) + 1) / 2;
+      ctx.strokeStyle = hexRgba(color, 0.3 + pulse * 0.3);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 14 + pulse * 6, 0, Math.PI * 2); ctx.stroke();
+    }
+
     ctx.restore();
   }
 
-  function drawPointA(pt, color) {
-    if (!pt) return;
-    ctx.save();
-    ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 15;
-    ctx.beginPath(); ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0; ctx.font = '700 11px Inter, sans-serif';
-    ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.fillText('A', pt.x, pt.y - 14);
-    ctx.restore();
-  }
-
-  return { draw, clear, snapshot, syncSize, hitTest, toCanvas, drawManualLine, drawPointA };
+  return { draw, clear, snapshot, syncSize, hitTest, toCanvas, drawMultiPoints };
 })();
