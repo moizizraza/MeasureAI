@@ -1,15 +1,14 @@
 /* ════════════════════════════════════════════════════════
-   app.js — AI Precision Tracking Controller
+   app.js — AI + Manual Measurement Controller
    
-   - Track IDs: each physical object gets a stable ID across frames
-   - Selection by track ID: tap bottle #1 → only #1 is measured
-   - Precision lock: after 15+ stable frames, measurement locks ✓
-   - Clean screen: zero overlays until user taps
+   Two modes:
+   - Auto: AI detects objects, tap to measure
+   - Manual A→B: tap two points to measure any distance
    ════════════════════════════════════════════════════════ */
 
 (async () => {
 
-  // Wait for intro screen to be dismissed
+  // Wait for intro + instructions to be dismissed
   if (document.getElementById('intro-screen')) {
     await new Promise(resolve => {
       window.addEventListener('intro-done', resolve, { once: true });
@@ -21,8 +20,12 @@
     frozen:  false,
     history: [],
     lastDetections: [],
-    selectedTrackIds: new Set(),  // track IDs the user has tapped
+    selectedTrackIds: new Set(),
     fps: 0,
+    mode: 'auto',              // 'auto' or 'manual'
+    manualA: null,             // { x, y } in canvas coords
+    manualB: null,             // { x, y } in canvas coords
+    manualMeasurement: null,   // formatted string
   };
 
   const $ = id => document.getElementById(id);
@@ -109,7 +112,7 @@
   setStatus('Point camera & tap any object', 'live');
 
   /* ═══════════════════════════════════
-     STEP 4 — Tracked Detection Loop
+     STEP 4 — Detection Loop
   ═══════════════════════════════════ */
   const { w: vidW, h: vidH } = Camera.getDims();
   let fc = 0, fpsT = performance.now();
@@ -127,43 +130,61 @@
       fc = 0; fpsT = now;
     }
 
-    // Calibrate
+    // Calibrate (always runs — needed for manual mode too)
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
-    // Prune dead selections (track IDs that no longer exist)
+    // Prune dead selections
     const liveIds = new Set(preds.map(p => p.trackId));
     for (const tid of S.selectedTrackIds) {
       if (!liveIds.has(tid)) S.selectedTrackIds.delete(tid);
     }
 
-    // Build items with track info
+    // Build items
     const items = preds.map(pred => ({
       label:       pred.class,
-      bbox:        pred.bbox,      // smoothed by tracker
+      bbox:        pred.bbox,
       score:       pred.score,
       trackId:     pred.trackId,
-      age:         pred.age,       // frames tracked
+      age:         pred.age,
       selected:    S.selectedTrackIds.has(pred.trackId),
       measurement: MeasureEngine.measure(pred, w || vidW, h || vidH),
     }));
 
     S.lastDetections = items;
 
-    // Draw only selected
+    // Draw AI detections (only selected ones shown)
     Renderer.draw(items, S.unit);
 
-    // Cards
+    // Draw manual measurement overlay
+    if (S.mode === 'manual') {
+      if (S.manualA && S.manualB) {
+        Renderer.drawManualLine(S.manualA, S.manualB, S.manualMeasurement, '#fbbf24');
+      } else if (S.manualA) {
+        Renderer.drawPointA(S.manualA, '#fbbf24');
+      }
+    }
+
+    // Cards (auto mode only)
     const sel = items.filter(m => m.selected);
-    renderCards(sel);
+    if (S.mode === 'auto') {
+      renderCards(sel);
+    } else {
+      renderManualCard();
+    }
 
     // Status
-    if (sel.length > 0) {
-      const info = sel.map(m => {
-        const locked = m.age >= 15;
-        return `${m.label}${locked ? ' ✓' : ''}`;
-      }).join(', ');
+    if (S.mode === 'manual') {
+      if (S.manualA && S.manualB) {
+        setStatus(`Manual: ${S.manualMeasurement || '—'}`, 'live');
+      } else if (S.manualA) {
+        setStatus('Tap Point B', 'live');
+      } else {
+        setStatus('Tap Point A on screen', 'live');
+      }
+    } else if (sel.length > 0) {
+      const info = sel.map(m => `${m.label}${m.age >= 15 ? ' ✓' : ''}`).join(', ');
       setStatus(`Measuring: ${info}`, 'live');
     } else if (preds.length > 0) {
       setStatus('Tap any object to measure', 'live');
@@ -173,7 +194,7 @@
   });
 
   /* ═══════════════════════════════════
-     TAP-TO-MEASURE (Track-ID Based)
+     TAP HANDLER (Auto + Manual)
   ═══════════════════════════════════ */
   let lastTapTs = 0;
 
@@ -194,11 +215,41 @@
     }
 
     const px = cx - rect.left, py = cy - rect.top;
+
+    // ── Manual mode: A→B point measurement ──
+    if (S.mode === 'manual') {
+      try { navigator.vibrate?.(30); } catch {}
+
+      if (!S.manualA) {
+        S.manualA = { x: px, y: py };
+        S.manualB = null;
+        S.manualMeasurement = null;
+        toast('Point A set — now tap Point B', 's', 2000);
+      } else if (!S.manualB) {
+        S.manualB = { x: px, y: py };
+        const distPx = Math.hypot(S.manualB.x - S.manualA.x, S.manualB.y - S.manualA.y);
+        const info = MeasureEngine.getCalibrationInfo();
+        if (info.calibrated && info.pxPerMm > 0) {
+          const mm = distPx / info.pxPerMm;
+          S.manualMeasurement = MeasureEngine.format(mm, S.unit);
+          toast(`📐 Manual: ${S.manualMeasurement}`, 's', 3000);
+        } else {
+          S.manualMeasurement = `${Math.round(distPx)}px (uncalibrated)`;
+          toast('⚠️ Place a known object in view for accuracy', 'w', 3000);
+        }
+      } else {
+        // Third tap = reset
+        S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+        toast('Manual cleared — tap Point A', '', 1200);
+      }
+      return;
+    }
+
+    // ── Auto mode: AI tap-to-measure ──
     const hit = Renderer.hitTest(S.lastDetections, px, py);
 
     if (hit) {
       try { navigator.vibrate?.(30); } catch {}
-
       if (S.selectedTrackIds.has(hit.trackId)) {
         S.selectedTrackIds.delete(hit.trackId);
         toast(`Deselected: ${hit.label}`, '', 1200);
@@ -273,25 +324,95 @@
     });
   }
 
+  function renderManualCard() {
+    const scroll = $('results-scroll'), ph = $('result-placeholder');
+    if (!scroll || !ph) return;
+
+    // Remove AI cards
+    scroll.querySelectorAll('.mcard:not([data-key="manual"])').forEach(c => c.remove());
+
+    if (!S.manualA || !S.manualB || !S.manualMeasurement) {
+      scroll.querySelector('.mcard[data-key="manual"]')?.remove();
+      ph.classList.remove('hidden');
+      ph.querySelector('span').textContent = S.manualA ? 'Tap Point B on screen' : 'Tap Point A on screen';
+      return;
+    }
+
+    ph.classList.add('hidden');
+
+    let card = scroll.querySelector('.mcard[data-key="manual"]');
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'mcard';
+      card.dataset.key = 'manual';
+      scroll.appendChild(card);
+    }
+
+    card.innerHTML = `
+      <div class="mcard-hdr">
+        <span class="mcard-emoji">📐</span>
+        <span class="mcard-conf-chip med">A→B</span>
+      </div>
+      <div class="mcard-label">Manual Measurement</div>
+      <div class="mcard-dims">
+        <div class="mcard-dim"><span class="dim-lbl">📏</span>${S.manualMeasurement}</div>
+      </div>
+    `;
+  }
+
   /* ═══════════════════════════════════
      CONTROLS
   ═══════════════════════════════════ */
+
+  // Mode toggle: Auto ↔ Manual
+  $('btn-mode').addEventListener('click', () => {
+    if (S.mode === 'auto') {
+      S.mode = 'manual';
+      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+      S.selectedTrackIds.clear();
+      $('mode-label').textContent = 'A→B';
+      $('btn-mode').classList.add('mode-active');
+      toast('Manual mode: Tap Point A', 's', 2000);
+      setStatus('Tap Point A on screen', 'live');
+    } else {
+      S.mode = 'auto';
+      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
+      $('mode-label').textContent = 'Auto';
+      $('btn-mode').classList.remove('mode-active');
+      toast('AI Auto mode', '', 1500);
+      setStatus('Tap any object to measure', 'live');
+    }
+  });
+
+  // Unit toggle
   $('btn-unit').addEventListener('click', () => {
     const u = ['cm','in','mm'];
     S.unit = u[(u.indexOf(S.unit)+1) % u.length];
     $('unit-label').textContent = S.unit;
     toast(`Unit: ${S.unit}`, '', 1200);
+    // Recalculate manual measurement if exists
+    if (S.mode === 'manual' && S.manualA && S.manualB) {
+      const distPx = Math.hypot(S.manualB.x - S.manualA.x, S.manualB.y - S.manualA.y);
+      const info = MeasureEngine.getCalibrationInfo();
+      if (info.calibrated && info.pxPerMm > 0) {
+        S.manualMeasurement = MeasureEngine.format(distPx / info.pxPerMm, S.unit);
+      }
+    }
   });
 
+  // Flip camera
   $('btn-flip').addEventListener('click', async () => {
     setStatus('Switching…', 'paused');
     try {
       await Camera.flip();
-      MeasureEngine.reset(); Detector.resetTracks(); S.selectedTrackIds.clear();
+      MeasureEngine.reset(); Detector.resetTracks();
+      S.selectedTrackIds.clear();
+      S.manualA = null; S.manualB = null; S.manualMeasurement = null;
       setStatus('Point camera & tap any object', 'live');
     } catch { toast('Cannot flip', 'e'); }
   });
 
+  // Freeze / Resume
   $('btn-freeze').addEventListener('click', toggleFreeze);
   $('freeze-overlay').addEventListener('click', toggleFreeze);
   function toggleFreeze() {
@@ -299,25 +420,29 @@
     $('freeze-overlay').classList.toggle('hidden', !S.frozen);
     const ico = $('freeze-ico');
     if (S.frozen) { Detector.pause(); ico.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>'; setStatus('Frozen', 'paused'); }
-    else { Detector.resume(); ico.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>'; setStatus('Point camera & tap any object', 'live'); }
+    else { Detector.resume(); ico.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>'; setStatus('Scanning…', 'live'); }
   }
 
+  // Capture
   $('btn-capture').addEventListener('click', () => {
-    const sel = S.lastDetections.filter(m => m.selected);
-    if (!sel.length) { toast('Tap an object first!', 'w', 2000); return; }
+    const hasMeas = S.lastDetections.some(m => m.selected) || (S.mode === 'manual' && S.manualMeasurement);
+    if (!hasMeas) { toast('Measure something first!', 'w', 2000); return; }
     saveHistory(Renderer.snapshot()); flashEffect(); toast('📸 Saved!', 's', 1500);
   });
 
+  // Clear
   $('btn-reset').addEventListener('click', () => {
     S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
+    S.manualA = null; S.manualB = null; S.manualMeasurement = null;
     updateCalibBadge(); toast('Cleared', '', 1200);
   });
 
-  $('btn-history').addEventListener('click', () => { close(); $('history-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
-  $('btn-tips').addEventListener('click', () => { close(); $('tips-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
-  $('btn-tips-close').addEventListener('click', close);
-  $('backdrop').addEventListener('click', close);
-  function close() { $('history-drawer').classList.add('hidden'); $('tips-drawer').classList.add('hidden'); $('backdrop').classList.add('hidden'); }
+  // Drawers
+  $('btn-history').addEventListener('click', () => { closeDrawers(); $('history-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
+  $('btn-tips').addEventListener('click', () => { closeDrawers(); $('tips-drawer').classList.remove('hidden'); $('backdrop').classList.remove('hidden'); });
+  $('btn-tips-close').addEventListener('click', closeDrawers);
+  $('backdrop').addEventListener('click', closeDrawers);
+  function closeDrawers() { $('history-drawer').classList.add('hidden'); $('tips-drawer').classList.add('hidden'); $('backdrop').classList.add('hidden'); }
   $('btn-clear').addEventListener('click', () => { S.history = []; $('history-list').innerHTML = '<li class="hist-empty">No measurements yet</li>'; });
 
   window.addEventListener('resize', () => Renderer.syncSize());
@@ -331,11 +456,11 @@
     S.history.unshift({ img: imgUrl, meas: S.lastDetections, ts });
     const hl = $('history-list'), empty = hl.querySelector('.hist-empty');
     if (empty) empty.remove();
-    const wL = top ? MeasureEngine.format(top.measurement.widthMm, S.unit) : '—';
-    const hL = top ? MeasureEngine.format(top.measurement.heightMm, S.unit) : '—';
+    const label = S.mode === 'manual' ? `📐 Manual: ${S.manualMeasurement}` : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
+    const dims = S.mode === 'manual' ? S.manualMeasurement : (top ? `${MeasureEngine.format(top.measurement.widthMm, S.unit)} × ${MeasureEngine.format(top.measurement.heightMm, S.unit)}` : '—');
     const li = document.createElement('li');
     li.className = 'hist-item';
-    li.innerHTML = `<img class="hist-thumb" src="${imgUrl}" alt="snap"/><div class="hist-info"><div class="hist-label">${top ? top.measurement.emoji+' '+top.label : 'Snap'}</div><div class="hist-dims">${wL} × ${hL}</div><div class="hist-time">${ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div></div>`;
+    li.innerHTML = `<img class="hist-thumb" src="${imgUrl}" alt="snap"/><div class="hist-info"><div class="hist-label">${label}</div><div class="hist-dims">${dims}</div><div class="hist-time">${ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div></div>`;
     hl.prepend(li);
   }
 
@@ -346,5 +471,5 @@
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ AI Precision Tracking active');
+  console.log('[MeasureAI] ✓ AI + Manual measurement ready');
 })();

@@ -4,14 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MeasureAI — Real-Time Object Measurement</title>
-
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
-
   <script src="https://unpkg.com/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
   <script src="https://unpkg.com/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
-
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
@@ -30,7 +27,49 @@
   </div>
 </div>
 
-<!-- ═══ LOADING (hidden until intro dismissed) ═══ -->
+<!-- ═══ INSTRUCTIONS & CAUTIONS ═══ -->
+<div id="instructions-screen" class="hidden">
+  <div class="instr-content">
+    <h2 class="instr-title">📐 How To Use</h2>
+
+    <div class="instr-section">
+      <h3 class="instr-heading">🎯 Instructions</h3>
+      <div class="instr-steps">
+        <div class="instr-step">
+          <span class="instr-num">1</span>
+          <div><b>Point your camera</b> at any object you want to measure.</div>
+        </div>
+        <div class="instr-step">
+          <span class="instr-num">2</span>
+          <div><b>Tap the object</b> on screen — AI detects and measures it instantly.</div>
+        </div>
+        <div class="instr-step">
+          <span class="instr-num">3</span>
+          <div>For <b>big or unknown objects</b>, switch to <b>Manual A→B mode</b> and tap two points to measure any distance.</div>
+        </div>
+        <div class="instr-step">
+          <span class="instr-num">4</span>
+          <div><b>Place a known object</b> (phone, credit card) in view for 99% accuracy calibration.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="instr-section">
+      <h3 class="instr-heading">⚠️ Cautions</h3>
+      <div class="instr-cautions">
+        <div class="instr-caution">🚫 <b>No living things</b> — People and animals are automatically filtered out.</div>
+        <div class="instr-caution">📐 <b>Keep it straight</b> — Angled views reduce measurement accuracy.</div>
+        <div class="instr-caution">💡 <b>Good lighting</b> — Avoid dark rooms or harsh backlighting.</div>
+        <div class="instr-caution">📱 <b>Hold steady</b> — Keep phone still 2-3 seconds for precision lock.</div>
+        <div class="instr-caution">📏 <b>Distance</b> — Best results at 30cm to 1.5m from the object.</div>
+      </div>
+    </div>
+
+    <button id="instr-continue-btn" class="intro-btn">Continue</button>
+  </div>
+</div>
+
+<!-- ═══ LOADING ═══ -->
 <div id="loading-screen" class="hidden">
   <div class="loader-orb">
     <div class="orb-ring r1"></div>
@@ -61,7 +100,11 @@
       <div class="offline-badge"><span class="offline-dot"></span><span>Offline AI</span></div>
     </div>
     <div class="hdr-right">
-      <button class="icon-btn" id="btn-tips" title="Accuracy instructions">
+      <button class="icon-btn mode-btn" id="btn-mode" title="Auto / Manual mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h4m12 0h4M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
+        <span id="mode-label" style="font-size:.55rem;font-weight:700;">Auto</span>
+      </button>
+      <button class="icon-btn" id="btn-tips" title="Instructions">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
       </button>
       <button class="icon-btn" id="btn-unit" title="Change unit"><span id="unit-label">cm</span></button>
@@ -80,17 +123,14 @@
     <canvas id="canvas"></canvas>
     <div class="scan-overlay"><div class="corner-tl"></div><div class="corner-tr"></div><div class="corner-bl"></div><div class="corner-br"></div></div>
     <div class="scan-beam"></div>
-
     <div class="vp-status">
       <div class="status-pill"><span class="status-led" id="status-led"></span><span id="status-txt">Initializing…</span></div>
       <div class="fps-chip" id="fps-chip">0 fps</div>
     </div>
-
     <div class="calib-badge" id="calib-badge">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1l2 5h5l-4 3 1.5 5L8 11l-4.5 3L5 9 1 6h5z"/></svg>
       <span id="calib-txt">Calibrating…</span>
     </div>
-
     <div class="freeze-overlay hidden" id="freeze-overlay">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       <span>Tap anywhere to resume</span>
@@ -102,7 +142,7 @@
     <div class="results-scroll" id="results-scroll">
       <div class="result-placeholder" id="result-placeholder">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>
-        <span>Tap any object on screen to measure it</span>
+        <span>Tap any object to measure · Switch to A→B for manual</span>
       </div>
     </div>
   </div>
@@ -127,58 +167,37 @@
     <ul id="history-list" class="history-list"><li class="hist-empty">No measurements yet</li></ul>
   </div>
 
-  <!-- Tips / Instructions Modal -->
+  <!-- Tips Drawer -->
   <div class="drawer hidden" id="tips-drawer">
     <div class="drawer-bar"></div>
-    <div class="drawer-hdr"><h3>📏 Instructions for 100% Accuracy</h3><button class="icon-btn" id="btn-tips-close">✕</button></div>
+    <div class="drawer-hdr"><h3>📏 Instructions</h3><button class="icon-btn" id="btn-tips-close">✕</button></div>
     <div class="tips-scroll">
       <div class="tip-card tip-important">
         <div class="tip-num">⚡</div>
         <div class="tip-body">
-          <div class="tip-title">Rule #1: Place a Known Object Beside It</div>
-          <p>Put your <b>smartphone flat</b> or a <b>standard credit card</b> next to the item you want to measure on the same surface. The AI uses this known reference to lock the real-world scale with <b>98–99% accuracy</b>.</p>
+          <div class="tip-title">Place a Known Object for Best Accuracy</div>
+          <p>Put your <b>smartphone flat</b> or a <b>credit card</b> next to items for <b>98–99% accuracy</b>.</p>
         </div>
       </div>
       <div class="tip-card">
-        <div class="tip-num">1</div>
+        <div class="tip-num">📐</div>
         <div class="tip-body">
-          <div class="tip-title">Camera Angle: Straight & Perpendicular</div>
-          <p>Point your camera directly face-on at the object, not tilted at an angle. Angled views distort perspective and can cause measurement error.</p>
-        </div>
-      </div>
-      <div class="tip-card">
-        <div class="tip-num">2</div>
-        <div class="tip-body">
-          <div class="tip-title">Good, Even Lighting</div>
-          <p>Ensure the object is well-lit from the front. Avoid harsh shadows or strong backlights that blur the object's edges.</p>
+          <div class="tip-title">Manual A→B Mode</div>
+          <p>For <b>big or unknown objects</b>, tap the mode button to switch to Manual. Then tap Point A and Point B on screen to measure any distance.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">ℹ️</div>
         <div class="tip-body">
           <div class="tip-title">Objects Only — No Living Things</div>
-          <p>MeasureAI measures <b>objects only</b> (bottles, laptops, cups, etc.). People, animals, and other living creatures are automatically filtered out for accuracy.</p>
+          <p>MeasureAI measures <b>objects only</b>. People and animals are automatically filtered out.</p>
         </div>
       </div>
       <div class="tip-card">
-        <div class="tip-num">3</div>
+        <div class="tip-num">📱</div>
         <div class="tip-body">
-          <div class="tip-title">Keep the Entire Object Visible</div>
-          <p>Do not cut off any edges. The AI needs the entire object in view to calculate its true height and width.</p>
-        </div>
-      </div>
-      <div class="tip-card">
-        <div class="tip-num">4</div>
-        <div class="tip-body">
-          <div class="tip-title">Hold Steady for 2–3 Seconds</div>
-          <p>The app averages measurements across multiple frames to eliminate jitter. Holding steady lets the numbers lock into the exact real measurement.</p>
-        </div>
-      </div>
-      <div class="tip-card">
-        <div class="tip-num">5</div>
-        <div class="tip-body">
-          <div class="tip-title">Optimal Distance: 30cm to 1.5m</div>
-          <p>Stay within comfortable desk/room distance so the object fills 25% to 75% of your camera frame.</p>
+          <div class="tip-title">Hold Steady for Precision Lock</div>
+          <p>Keep your phone still for 2–3 seconds. The AI averages across frames for 🔒 Precision Locked accuracy.</p>
         </div>
       </div>
     </div>

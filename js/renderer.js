@@ -263,5 +263,60 @@ const Renderer = (() => {
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  return { draw, clear, snapshot, syncSize, hitTest, toCanvas };
+  /* ── Manual A→B measurement line ── */
+  function drawManualLine(ptA, ptB, label, color) {
+    if (!ptA) return;
+    ctx.save();
+    // Point A
+    ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 15;
+    ctx.beginPath(); ctx.arc(ptA.x, ptA.y, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ptA.x, ptA.y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.font = '700 11px Inter, sans-serif';
+    ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.fillText('A', ptA.x, ptA.y - 14);
+
+    if (ptB) {
+      // Point B
+      ctx.shadowColor = color; ctx.shadowBlur = 15; ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(ptB.x, ptB.y, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ptB.x, ptB.y, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0; ctx.fillStyle = color; ctx.fillText('B', ptB.x, ptB.y - 14);
+
+      // Connecting line
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.shadowColor = color; ctx.shadowBlur = 10;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(ptA.x, ptA.y); ctx.lineTo(ptB.x, ptB.y); ctx.stroke();
+      ctx.setLineDash([]); ctx.shadowBlur = 0;
+
+      // Measurement label at midpoint
+      if (label) {
+        const mx = (ptA.x + ptB.x) / 2, my = (ptA.y + ptB.y) / 2;
+        ctx.font = '700 13px JetBrains Mono, monospace';
+        const tw = ctx.measureText(label).width;
+        const pw = tw + 16, ph = 24;
+        ctx.fillStyle = 'rgba(4,6,14,.92)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(mx - pw/2, my - ph/2 - 16, pw, ph, 6);
+        else ctx.rect(mx - pw/2, my - ph/2 - 16, pw, ph);
+        ctx.fill();
+        ctx.strokeStyle = hexRgba(color, 0.7); ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(label, mx, my - 16);
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawPointA(pt, color) {
+    if (!pt) return;
+    ctx.save();
+    ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 15;
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.font = '700 11px Inter, sans-serif';
+    ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.fillText('A', pt.x, pt.y - 14);
+    ctx.restore();
+  }
+
+  return { draw, clear, snapshot, syncSize, hitTest, toCanvas, drawManualLine, drawPointA };
 })();
