@@ -1,15 +1,13 @@
 /* ════════════════════════════════════════════════════════
-   app.js — AI + World-Anchored Multi-Point Measurement
+   app.js — AI + AR-Anchored Measurement Controller
    
-   Manual points are stored in VIDEO coordinates and tracked
-   against camera motion using detected objects as spatial
-   anchors. When the camera moves, points stay locked in
-   the real world — just like Apple Measure.
+   Manual mode uses visual feature tracking (anchor.js)
+   to lock points to real-world surfaces. Points follow
+   the surface texture when the camera moves — like ARKit.
    ════════════════════════════════════════════════════════ */
 
 (async () => {
 
-  // Wait for intro + instructions
   if (document.getElementById('intro-screen')) {
     await new Promise(resolve => {
       window.addEventListener('intro-done', resolve, { once: true });
@@ -24,14 +22,9 @@
     selectedTrackIds: new Set(),
     fps: 0,
     mode: 'auto',
-    // Manual points stored in VIDEO coordinates (world-anchored)
-    manualPoints: [],       // [{ vx, vy }, ...] in video pixel space
     manualSegments: [],
     manualTotal: null,
   };
-
-  // ── Camera motion tracking state ──
-  let prevAnchors = {};  // { trackId: { cx, cy } } from previous frame
 
   const $ = id => document.getElementById(id);
   const videoEl = document.getElementById('video');
@@ -73,92 +66,40 @@
     }
   }
 
-  /* ── Convert canvas point to video coordinates ── */
+  /* ── Video ↔ Canvas coordinate conversion ── */
   function canvasToVideo(cx, cy) {
     const canvasEl = document.getElementById('canvas');
-    const vw = videoEl.videoWidth || 1;
-    const vh = videoEl.videoHeight || 1;
+    const vw = videoEl.videoWidth || 1, vh = videoEl.videoHeight || 1;
     const cw = canvasEl.width, ch = canvasEl.height;
     const s = Math.max(cw / vw, ch / vh);
-    const ox = (cw - vw * s) / 2;
-    const oy = (ch - vh * s) / 2;
+    const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
     return { vx: (cx - ox) / s, vy: (cy - oy) / s };
   }
 
-  /* ── Convert video point to canvas coordinates ── */
   function videoToCanvas(vx, vy) {
     const canvasEl = document.getElementById('canvas');
-    const vw = videoEl.videoWidth || 1;
-    const vh = videoEl.videoHeight || 1;
+    const vw = videoEl.videoWidth || 1, vh = videoEl.videoHeight || 1;
     const cw = canvasEl.width, ch = canvasEl.height;
     const s = Math.max(cw / vw, ch / vh);
-    const ox = (cw - vw * s) / 2;
-    const oy = (ch - vh * s) / 2;
+    const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
     return { x: vx * s + ox, y: vy * s + oy };
   }
 
-  /* ── Track camera motion using detected objects as anchors ── */
-  function trackCameraMotion(preds) {
-    if (S.manualPoints.length === 0) {
-      // Just update anchors, no points to shift
-      prevAnchors = {};
-      for (const p of preds) {
-        const [bx, by, bw, bh] = p.bbox;
-        prevAnchors[p.trackId] = { cx: bx + bw / 2, cy: by + bh / 2 };
-      }
-      return;
-    }
-
-    // Build current anchor positions
-    const currAnchors = {};
-    for (const p of preds) {
-      const [bx, by, bw, bh] = p.bbox;
-      currAnchors[p.trackId] = { cx: bx + bw / 2, cy: by + bh / 2 };
-    }
-
-    // Find matching anchors (same trackId in both frames)
-    let dx = 0, dy = 0, count = 0;
-    for (const tid in currAnchors) {
-      if (prevAnchors[tid]) {
-        dx += currAnchors[tid].cx - prevAnchors[tid].cx;
-        dy += currAnchors[tid].cy - prevAnchors[tid].cy;
-        count++;
-      }
-    }
-
-    // Apply average displacement to all manual points
-    if (count > 0) {
-      dx /= count;
-      dy /= count;
-
-      // Only apply if significant motion (> 0.5px in video space)
-      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-        for (const pt of S.manualPoints) {
-          pt.vx += dx;
-          pt.vy += dy;
-        }
-      }
-    }
-
-    // Update anchors for next frame
-    prevAnchors = currAnchors;
-  }
-
-  /* ── Recalculate all manual segments (in video coords) ── */
+  /* ── Recalculate manual segments from anchor points ── */
   function recalcManual() {
     const info = MeasureEngine.getCalibrationInfo();
-    const pts = S.manualPoints;
+    const pts = Anchor.getPoints();
     S.manualSegments = [];
     let totalMm = 0;
 
     for (let i = 0; i < pts.length - 1; i++) {
-      const distVidPx = Math.hypot(pts[i+1].vx - pts[i].vx, pts[i+1].vy - pts[i].vy);
+      const distPx = Math.hypot(pts[i+1].vx - pts[i].vx, pts[i+1].vy - pts[i].vy);
       if (info.calibrated && info.pxPerMm > 0) {
-        const mm = distVidPx / info.pxPerMm;
+        const mm = distPx / info.pxPerMm;
         totalMm += mm;
         S.manualSegments.push(MeasureEngine.format(mm, S.unit));
       } else {
-        S.manualSegments.push(`${Math.round(distVidPx)}px`);
+        S.manualSegments.push(`${Math.round(distPx)}px`);
       }
     }
 
@@ -171,9 +112,12 @@
     }
   }
 
-  /* ── Convert video-coord points to canvas-coord points for renderer ── */
-  function getCanvasPoints() {
-    return S.manualPoints.map(pt => videoToCanvas(pt.vx, pt.vy));
+  /* ── Get canvas-coord points with confidence for renderer ── */
+  function getCanvasPointsWithConf() {
+    return Anchor.getPoints().map(p => {
+      const c = videoToCanvas(p.vx, p.vy);
+      return { x: c.x, y: c.y, conf: p.confidence };
+    });
   }
 
   /* ═══════════════════════════════════
@@ -188,6 +132,9 @@
     const f = $('loader-fill'); if (f) f.style.background = '#f87171';
     return;
   }
+
+  // Initialize visual anchor tracker
+  Anchor.init(videoEl);
 
   /* ═══════════════════════════════════
      STEP 2 — Load AI Model
@@ -244,9 +191,9 @@
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
-    // ── Camera motion tracking: shift manual points to stay world-locked ──
-    if (S.mode === 'manual') {
-      trackCameraMotion(preds);
+    // ── Visual feature tracking: update anchored points ──
+    if (S.mode === 'manual' && Anchor.count() > 0) {
+      Anchor.updateAll();
     }
 
     // Prune dead selections
@@ -271,10 +218,10 @@
     // Draw AI detections
     Renderer.draw(items, S.unit);
 
-    // Draw manual multi-point overlay (convert video → canvas coords)
-    if (S.mode === 'manual' && S.manualPoints.length > 0) {
+    // Draw AR-anchored manual points
+    if (S.mode === 'manual' && Anchor.count() > 0) {
       recalcManual();
-      const canvasPts = getCanvasPoints();
+      const canvasPts = getCanvasPointsWithConf();
       Renderer.drawMultiPoints(canvasPts, S.manualSegments, S.manualTotal, '#fbbf24');
     }
 
@@ -288,13 +235,13 @@
 
     // Status
     if (S.mode === 'manual') {
-      const n = S.manualPoints.length;
+      const n = Anchor.count();
       if (n >= 2) {
-        setStatus(`${n} points · ${S.manualTotal || '—'}`, 'live');
+        setStatus(`${n} anchored · ${S.manualTotal || '—'}`, 'live');
       } else if (n === 1) {
         setStatus('Tap next point', 'live');
       } else {
-        setStatus('Tap to place first point', 'live');
+        setStatus('Tap surface to anchor point', 'live');
       }
     } else if (sel.length > 0) {
       const info = sel.map(m => `${m.label}${m.age >= 15 ? ' ✓' : ''}`).join(', ');
@@ -329,18 +276,17 @@
 
     const px = cx - rect.left, py = cy - rect.top;
 
-    // ── Manual mode: place world-anchored point ──
+    // ── Manual mode: anchor point to surface ──
     if (S.mode === 'manual') {
       try { navigator.vibrate?.(25); } catch {}
 
-      // Convert canvas tap to video coordinates (world space)
       const vidPt = canvasToVideo(px, py);
-      S.manualPoints.push({ vx: vidPt.vx, vy: vidPt.vy });
+      Anchor.placePoint(vidPt.vx, vidPt.vy);
       recalcManual();
 
-      const n = S.manualPoints.length;
+      const n = Anchor.count();
       if (n === 1) {
-        toast('Point 1 anchored — keep tapping', 's', 1500);
+        toast('📌 Point anchored — tap next', 's', 1500);
       } else {
         const lastSeg = S.manualSegments[S.manualSegments.length - 1];
         toast(`📐 Segment ${n-1}: ${lastSeg}`, 's', 2000);
@@ -430,11 +376,12 @@
 
     scroll.querySelectorAll('.mcard:not([data-key="manual"])').forEach(c => c.remove());
 
-    if (S.manualPoints.length < 2) {
+    const n = Anchor.count();
+    if (n < 2) {
       scroll.querySelector('.mcard[data-key="manual"]')?.remove();
       ph.classList.remove('hidden');
       const sp = ph.querySelector('span');
-      if (sp) sp.textContent = S.manualPoints.length === 0 ? 'Tap to place first point' : 'Tap next point';
+      if (sp) sp.textContent = n === 0 ? 'Tap surface to anchor point' : 'Tap next point';
       return;
     }
 
@@ -455,7 +402,7 @@
     card.innerHTML = `
       <div class="mcard-hdr">
         <span class="mcard-emoji">📐</span>
-        <span class="mcard-conf-chip med">${S.manualPoints.length} pts</span>
+        <span class="mcard-conf-chip med">${n} pts</span>
       </div>
       <div class="mcard-label">Total: <b>${S.manualTotal || '—'}</b></div>
       <div class="mcard-dims">${segHtml}</div>
@@ -470,16 +417,17 @@
   $('btn-mode').addEventListener('click', () => {
     if (S.mode === 'auto') {
       S.mode = 'manual';
-      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
-      prevAnchors = {};
+      Anchor.clear();
+      Anchor.requestGyroPermission();
+      S.manualSegments = []; S.manualTotal = null;
       S.selectedTrackIds.clear();
       $('mode-label').textContent = 'A→B';
       $('btn-mode').classList.add('mode-active');
-      toast('Manual mode — points stay world-locked 📌', 's', 2500);
+      toast('📌 AR Anchor mode — points lock to surfaces', 's', 2500);
     } else {
       S.mode = 'auto';
-      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
-      prevAnchors = {};
+      Anchor.clear();
+      S.manualSegments = []; S.manualTotal = null;
       $('mode-label').textContent = 'Auto';
       $('btn-mode').classList.remove('mode-active');
       toast('AI Auto mode', '', 1500);
@@ -502,8 +450,7 @@
       await Camera.flip();
       MeasureEngine.reset(); Detector.resetTracks();
       S.selectedTrackIds.clear();
-      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
-      prevAnchors = {};
+      Anchor.clear(); S.manualSegments = []; S.manualTotal = null;
       setStatus('Point camera & tap any object', 'live');
     } catch { toast('Cannot flip', 'e'); }
   });
@@ -521,7 +468,7 @@
 
   // Capture
   $('btn-capture').addEventListener('click', () => {
-    const hasMeas = S.lastDetections.some(m => m.selected) || (S.mode === 'manual' && S.manualPoints.length >= 2);
+    const hasMeas = S.lastDetections.some(m => m.selected) || (S.mode === 'manual' && Anchor.count() >= 2);
     if (!hasMeas) { toast('Measure something first!', 'w', 2000); return; }
     saveHistory(Renderer.snapshot()); flashEffect(); toast('📸 Saved!', 's', 1500);
   });
@@ -529,9 +476,8 @@
   // Clear
   $('btn-reset').addEventListener('click', () => {
     if (S.mode === 'manual') {
-      S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
-      prevAnchors = {};
-      toast('Points cleared', '', 1200);
+      Anchor.clear(); S.manualSegments = []; S.manualTotal = null;
+      toast('Anchors cleared', '', 1200);
     } else {
       S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
       updateCalibBadge(); toast('Cleared', '', 1200);
@@ -558,7 +504,7 @@
     const hl = $('history-list'), empty = hl.querySelector('.hist-empty');
     if (empty) empty.remove();
     const label = S.mode === 'manual' ? `📐 Manual: ${S.manualTotal}` : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
-    const dims = S.mode === 'manual' ? `${S.manualPoints.length} points · ${S.manualTotal}` :
+    const dims = S.mode === 'manual' ? `${Anchor.count()} pts · ${S.manualTotal}` :
       (top ? `${MeasureEngine.format(top.measurement.widthMm, S.unit)} × ${MeasureEngine.format(top.measurement.heightMm, S.unit)}` : '—');
     const li = document.createElement('li');
     li.className = 'hist-item';
@@ -573,5 +519,5 @@
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ World-anchored measurement ready');
+  console.log('[MeasureAI] ✓ AR Anchor tracking active');
 })();

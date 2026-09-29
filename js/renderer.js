@@ -263,32 +263,48 @@ const Renderer = (() => {
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  /* ── Multi-Point Continuous Measurement ── */
+  /* ── Multi-Point AR-Anchored Measurement ── */
   function drawMultiPoints(points, segments, total, color) {
     if (!points || points.length === 0) return;
     ctx.save();
 
-    // Draw all segments
     for (let i = 0; i < points.length; i++) {
       const pt = points[i];
+      const conf = pt.conf != null ? pt.conf : 1;
 
-      // Glowing point marker
-      ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 14;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, i === 0 ? 9 : 7, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
+      // Confidence color: green=locked, yellow=tracking, red=lost
+      const ptColor = conf > 0.6 ? '#00e5b3' : conf > 0.3 ? '#fbbf24' : '#f87171';
+
+      // ── ARKit-style crosshair marker ──
+      const r = i === 0 ? 10 : 8;
+      // Outer glow ring
+      ctx.strokeStyle = ptColor; ctx.lineWidth = 2;
+      ctx.shadowColor = ptColor; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2); ctx.stroke();
+      // Center dot
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = ptColor;
       ctx.beginPath(); ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2); ctx.fill();
+      // Cross lines
+      ctx.strokeStyle = ptColor; ctx.lineWidth = 1.5;
+      const cl = 6;
+      ctx.beginPath();
+      ctx.moveTo(pt.x - r - cl, pt.y); ctx.lineTo(pt.x - r + 3, pt.y);
+      ctx.moveTo(pt.x + r + cl, pt.y); ctx.lineTo(pt.x + r - 3, pt.y);
+      ctx.moveTo(pt.x, pt.y - r - cl); ctx.lineTo(pt.x, pt.y - r + 3);
+      ctx.moveTo(pt.x, pt.y + r + cl); ctx.lineTo(pt.x, pt.y + r - 3);
+      ctx.stroke();
 
-      // Point label
-      ctx.font = '700 10px Inter, sans-serif';
-      ctx.fillStyle = i === 0 ? '#fff' : color;
-      ctx.textAlign = 'center';
-      ctx.fillText(String(i + 1), pt.x, pt.y - 14);
+      // Point number
+      ctx.font = '700 9px Inter, sans-serif';
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+      ctx.fillText(String(i + 1), pt.x, pt.y - r - 8);
 
       // Connecting line to next point
       if (i < points.length - 1) {
         const next = points[i + 1];
         ctx.strokeStyle = color; ctx.lineWidth = 2;
-        ctx.shadowColor = color; ctx.shadowBlur = 8;
+        ctx.shadowColor = color; ctx.shadowBlur = 6;
         ctx.setLineDash([5, 3]);
         ctx.beginPath(); ctx.moveTo(pt.x, pt.y); ctx.lineTo(next.x, next.y); ctx.stroke();
         ctx.setLineDash([]); ctx.shadowBlur = 0;
@@ -318,10 +334,10 @@ const Renderer = (() => {
       }
     }
 
-    // Total measurement pill (top of viewport)
+    // Total pill
     if (total && points.length >= 2) {
       ctx.font = '700 14px JetBrains Mono, monospace';
-      const label = `Total: ${total}`;
+      const label = `📐 ${total}`;
       const tw = ctx.measureText(label).width;
       const pw = tw + 20, ph = 28;
       const tx = canvas.width / 2, ty = 50;
@@ -338,13 +354,13 @@ const Renderer = (() => {
       ctx.fillText(label, tx, ty);
     }
 
-    // Hint: if only 1 point, show pulsing ring
+    // Pulsing ring on single point
     if (points.length === 1) {
       const pt = points[0];
       const pulse = (Math.sin(Date.now() / 300) + 1) / 2;
-      ctx.strokeStyle = hexRgba(color, 0.3 + pulse * 0.3);
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, 14 + pulse * 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = hexRgba('#00e5b3', 0.2 + pulse * 0.3);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 18 + pulse * 8, 0, Math.PI * 2); ctx.stroke();
     }
 
     ctx.restore();
