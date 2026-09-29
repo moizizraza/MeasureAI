@@ -1,15 +1,15 @@
 /* ════════════════════════════════════════════════════════
-   app.js — AI + Manual Multi-Point Measurement
+   app.js — AI + World-Anchored Multi-Point Measurement
    
-   Two modes:
-   - Auto: AI detects objects, tap to measure
-   - Manual: Continuous multi-point measurement (like Apple Measure)
-     tap point after point to measure along any path/shape
+   Manual points are stored in VIDEO coordinates and tracked
+   against camera motion using detected objects as spatial
+   anchors. When the camera moves, points stay locked in
+   the real world — just like Apple Measure.
    ════════════════════════════════════════════════════════ */
 
 (async () => {
 
-  // Wait for intro + instructions to be dismissed
+  // Wait for intro + instructions
   if (document.getElementById('intro-screen')) {
     await new Promise(resolve => {
       window.addEventListener('intro-done', resolve, { once: true });
@@ -23,13 +23,18 @@
     lastDetections: [],
     selectedTrackIds: new Set(),
     fps: 0,
-    mode: 'auto',           // 'auto' or 'manual'
-    manualPoints: [],       // [{ x, y }, ...] in canvas coords
-    manualSegments: [],     // ['3.2 cm', '5.1 cm', ...] per segment
-    manualTotal: null,      // '8.3 cm' total distance
+    mode: 'auto',
+    // Manual points stored in VIDEO coordinates (world-anchored)
+    manualPoints: [],       // [{ vx, vy }, ...] in video pixel space
+    manualSegments: [],
+    manualTotal: null,
   };
 
+  // ── Camera motion tracking state ──
+  let prevAnchors = {};  // { trackId: { cx, cy } } from previous frame
+
   const $ = id => document.getElementById(id);
+  const videoEl = document.getElementById('video');
 
   const setProgress = (msg, pct) => {
     const m = $('loader-msg'), f = $('loader-fill');
@@ -68,7 +73,78 @@
     }
   }
 
-  /* ── Recalculate all manual segments ── */
+  /* ── Convert canvas point to video coordinates ── */
+  function canvasToVideo(cx, cy) {
+    const canvasEl = document.getElementById('canvas');
+    const vw = videoEl.videoWidth || 1;
+    const vh = videoEl.videoHeight || 1;
+    const cw = canvasEl.width, ch = canvasEl.height;
+    const s = Math.max(cw / vw, ch / vh);
+    const ox = (cw - vw * s) / 2;
+    const oy = (ch - vh * s) / 2;
+    return { vx: (cx - ox) / s, vy: (cy - oy) / s };
+  }
+
+  /* ── Convert video point to canvas coordinates ── */
+  function videoToCanvas(vx, vy) {
+    const canvasEl = document.getElementById('canvas');
+    const vw = videoEl.videoWidth || 1;
+    const vh = videoEl.videoHeight || 1;
+    const cw = canvasEl.width, ch = canvasEl.height;
+    const s = Math.max(cw / vw, ch / vh);
+    const ox = (cw - vw * s) / 2;
+    const oy = (ch - vh * s) / 2;
+    return { x: vx * s + ox, y: vy * s + oy };
+  }
+
+  /* ── Track camera motion using detected objects as anchors ── */
+  function trackCameraMotion(preds) {
+    if (S.manualPoints.length === 0) {
+      // Just update anchors, no points to shift
+      prevAnchors = {};
+      for (const p of preds) {
+        const [bx, by, bw, bh] = p.bbox;
+        prevAnchors[p.trackId] = { cx: bx + bw / 2, cy: by + bh / 2 };
+      }
+      return;
+    }
+
+    // Build current anchor positions
+    const currAnchors = {};
+    for (const p of preds) {
+      const [bx, by, bw, bh] = p.bbox;
+      currAnchors[p.trackId] = { cx: bx + bw / 2, cy: by + bh / 2 };
+    }
+
+    // Find matching anchors (same trackId in both frames)
+    let dx = 0, dy = 0, count = 0;
+    for (const tid in currAnchors) {
+      if (prevAnchors[tid]) {
+        dx += currAnchors[tid].cx - prevAnchors[tid].cx;
+        dy += currAnchors[tid].cy - prevAnchors[tid].cy;
+        count++;
+      }
+    }
+
+    // Apply average displacement to all manual points
+    if (count > 0) {
+      dx /= count;
+      dy /= count;
+
+      // Only apply if significant motion (> 0.5px in video space)
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+        for (const pt of S.manualPoints) {
+          pt.vx += dx;
+          pt.vy += dy;
+        }
+      }
+    }
+
+    // Update anchors for next frame
+    prevAnchors = currAnchors;
+  }
+
+  /* ── Recalculate all manual segments (in video coords) ── */
   function recalcManual() {
     const info = MeasureEngine.getCalibrationInfo();
     const pts = S.manualPoints;
@@ -76,25 +152,28 @@
     let totalMm = 0;
 
     for (let i = 0; i < pts.length - 1; i++) {
-      const distPx = Math.hypot(pts[i+1].x - pts[i].x, pts[i+1].y - pts[i].y);
+      const distVidPx = Math.hypot(pts[i+1].vx - pts[i].vx, pts[i+1].vy - pts[i].vy);
       if (info.calibrated && info.pxPerMm > 0) {
-        const mm = distPx / info.pxPerMm;
+        const mm = distVidPx / info.pxPerMm;
         totalMm += mm;
         S.manualSegments.push(MeasureEngine.format(mm, S.unit));
       } else {
-        S.manualSegments.push(`${Math.round(distPx)}px`);
+        S.manualSegments.push(`${Math.round(distVidPx)}px`);
       }
     }
 
     if (pts.length >= 2) {
-      if (info.calibrated && info.pxPerMm > 0) {
-        S.manualTotal = MeasureEngine.format(totalMm, S.unit);
-      } else {
-        S.manualTotal = 'Uncalibrated';
-      }
+      S.manualTotal = info.calibrated && info.pxPerMm > 0
+        ? MeasureEngine.format(totalMm, S.unit)
+        : 'Uncalibrated';
     } else {
       S.manualTotal = null;
     }
+  }
+
+  /* ── Convert video-coord points to canvas-coord points for renderer ── */
+  function getCanvasPoints() {
+    return S.manualPoints.map(pt => videoToCanvas(pt.vx, pt.vy));
   }
 
   /* ═══════════════════════════════════
@@ -160,10 +239,15 @@
       fc = 0; fpsT = now;
     }
 
-    // Calibrate (always runs for both modes)
+    // Calibrate
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
+
+    // ── Camera motion tracking: shift manual points to stay world-locked ──
+    if (S.mode === 'manual') {
+      trackCameraMotion(preds);
+    }
 
     // Prune dead selections
     const liveIds = new Set(preds.map(p => p.trackId));
@@ -187,10 +271,11 @@
     // Draw AI detections
     Renderer.draw(items, S.unit);
 
-    // Draw manual multi-point overlay
+    // Draw manual multi-point overlay (convert video → canvas coords)
     if (S.mode === 'manual' && S.manualPoints.length > 0) {
-      recalcManual(); // live recalc as calibration improves
-      Renderer.drawMultiPoints(S.manualPoints, S.manualSegments, S.manualTotal, '#fbbf24');
+      recalcManual();
+      const canvasPts = getCanvasPoints();
+      Renderer.drawMultiPoints(canvasPts, S.manualSegments, S.manualTotal, '#fbbf24');
     }
 
     // Cards
@@ -207,7 +292,7 @@
       if (n >= 2) {
         setStatus(`${n} points · ${S.manualTotal || '—'}`, 'live');
       } else if (n === 1) {
-        setStatus('Tap next point to measure', 'live');
+        setStatus('Tap next point', 'live');
       } else {
         setStatus('Tap to place first point', 'live');
       }
@@ -244,16 +329,18 @@
 
     const px = cx - rect.left, py = cy - rect.top;
 
-    // ── Manual mode: add point ──
+    // ── Manual mode: place world-anchored point ──
     if (S.mode === 'manual') {
       try { navigator.vibrate?.(25); } catch {}
 
-      S.manualPoints.push({ x: px, y: py });
+      // Convert canvas tap to video coordinates (world space)
+      const vidPt = canvasToVideo(px, py);
+      S.manualPoints.push({ vx: vidPt.vx, vy: vidPt.vy });
       recalcManual();
 
       const n = S.manualPoints.length;
       if (n === 1) {
-        toast('Point 1 set — keep tapping', 's', 1500);
+        toast('Point 1 anchored — keep tapping', 's', 1500);
       } else {
         const lastSeg = S.manualSegments[S.manualSegments.length - 1];
         toast(`📐 Segment ${n-1}: ${lastSeg}`, 's', 2000);
@@ -346,9 +433,8 @@
     if (S.manualPoints.length < 2) {
       scroll.querySelector('.mcard[data-key="manual"]')?.remove();
       ph.classList.remove('hidden');
-      const hint = S.manualPoints.length === 0 ? 'Tap to place first point' : 'Tap next point to measure';
       const sp = ph.querySelector('span');
-      if (sp) sp.textContent = hint;
+      if (sp) sp.textContent = S.manualPoints.length === 0 ? 'Tap to place first point' : 'Tap next point';
       return;
     }
 
@@ -371,7 +457,7 @@
         <span class="mcard-emoji">📐</span>
         <span class="mcard-conf-chip med">${S.manualPoints.length} pts</span>
       </div>
-      <div class="mcard-label">Manual · Total: <b>${S.manualTotal || '—'}</b></div>
+      <div class="mcard-label">Total: <b>${S.manualTotal || '—'}</b></div>
       <div class="mcard-dims">${segHtml}</div>
     `;
   }
@@ -385,25 +471,18 @@
     if (S.mode === 'auto') {
       S.mode = 'manual';
       S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
+      prevAnchors = {};
       S.selectedTrackIds.clear();
       $('mode-label').textContent = 'A→B';
       $('btn-mode').classList.add('mode-active');
-      toast('Manual mode — tap points to measure', 's', 2000);
+      toast('Manual mode — points stay world-locked 📌', 's', 2500);
     } else {
       S.mode = 'auto';
       S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
+      prevAnchors = {};
       $('mode-label').textContent = 'Auto';
       $('btn-mode').classList.remove('mode-active');
       toast('AI Auto mode', '', 1500);
-    }
-  });
-
-  // Undo last point (long press Clear in manual mode)
-  $('btn-undo')?.addEventListener('click', () => {
-    if (S.mode === 'manual' && S.manualPoints.length > 0) {
-      S.manualPoints.pop();
-      recalcManual();
-      toast(`Undo — ${S.manualPoints.length} points`, '', 1200);
     }
   });
 
@@ -424,6 +503,7 @@
       MeasureEngine.reset(); Detector.resetTracks();
       S.selectedTrackIds.clear();
       S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
+      prevAnchors = {};
       setStatus('Point camera & tap any object', 'live');
     } catch { toast('Cannot flip', 'e'); }
   });
@@ -446,10 +526,11 @@
     saveHistory(Renderer.snapshot()); flashEffect(); toast('📸 Saved!', 's', 1500);
   });
 
-  // Clear / Reset
+  // Clear
   $('btn-reset').addEventListener('click', () => {
     if (S.mode === 'manual') {
       S.manualPoints = []; S.manualSegments = []; S.manualTotal = null;
+      prevAnchors = {};
       toast('Points cleared', '', 1200);
     } else {
       S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
@@ -492,5 +573,5 @@
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ AI + Multi-Point Manual measurement ready');
+  console.log('[MeasureAI] ✓ World-anchored measurement ready');
 })();
