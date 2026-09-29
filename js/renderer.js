@@ -98,6 +98,11 @@ const Renderer = (() => {
         const distLabel = MeasureEngine.formatDist(meas.distanceCm);
         if (distLabel) drawTag(ctx, cx + cw - 2, cy + ch + 32, distLabel, color);
       }
+      // Volume tag (for 3D objects with depth)
+      if (meas.volumeCm3) {
+        const volLabel = MeasureEngine.formatVolume(meas.volumeCm3);
+        if (volLabel) drawTag(ctx, cx + cw - 2, cy + ch + (meas.distanceCm ? 52 : 32), `📦 Vol: ${volLabel}`, color);
+      }
     }
 
     // ── Object label pill ──
@@ -263,11 +268,70 @@ const Renderer = (() => {
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  /* ── Multi-Point AR-Anchored Measurement ── */
-  function drawMultiPoints(points, segments, total, color) {
+  /* ── Multi-Point AR-Anchored Measurement with Area, Angles & Closed Shapes ── */
+  function drawMultiPoints(points, segments, total, color, shapeClosed = false, area = null) {
     if (!points || points.length === 0) return;
     ctx.save();
 
+    // 1. If closed shape, fill polygon with soft glow
+    if (shapeClosed && points.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      ctx.closePath();
+      ctx.fillStyle = hexRgba(color, 0.12);
+      ctx.fill();
+    }
+
+    const n = points.length;
+    const loop = shapeClosed ? n : n - 1;
+
+    // 2. Draw connecting segments
+    for (let i = 0; i < loop; i++) {
+      const pt = points[i];
+      const next = points[(i + 1) % n];
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 6;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(pt.x, pt.y);
+      ctx.lineTo(next.x, next.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+
+      // Segment measurement label
+      if (segments && segments[i]) {
+        const mx = (pt.x + next.x) / 2;
+        const my = (pt.y + next.y) / 2;
+        const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
+        const offsetX = Math.sin(angle) * 16;
+        const offsetY = -Math.cos(angle) * 16;
+
+        ctx.font = '700 11px JetBrains Mono, monospace';
+        const tw = ctx.measureText(segments[i]).width;
+        const pw = tw + 12, ph = 18;
+        const lx = mx + offsetX, ly = my + offsetY;
+
+        ctx.fillStyle = 'rgba(4,6,14,.9)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(lx - pw/2, ly - ph/2, pw, ph, 4);
+        else ctx.rect(lx - pw/2, ly - ph/2, pw, ph);
+        ctx.fill();
+        ctx.strokeStyle = hexRgba(color, 0.5);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(segments[i], lx, ly);
+      }
+    }
+
+    // 3. Draw points & vertex angles
     for (let i = 0; i < points.length; i++) {
       const pt = points[i];
       const conf = pt.conf != null ? pt.conf : 1;
@@ -275,18 +339,25 @@ const Renderer = (() => {
       // Confidence color: green=locked, yellow=tracking, red=lost
       const ptColor = conf > 0.6 ? '#00e5b3' : conf > 0.3 ? '#fbbf24' : '#f87171';
 
-      // ── ARKit-style crosshair marker ──
+      // ARKit-style crosshair marker
       const r = i === 0 ? 10 : 8;
-      // Outer glow ring
-      ctx.strokeStyle = ptColor; ctx.lineWidth = 2;
-      ctx.shadowColor = ptColor; ctx.shadowBlur = 12;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2); ctx.stroke();
-      // Center dot
+      ctx.strokeStyle = ptColor;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = ptColor;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+
       ctx.shadowBlur = 0;
       ctx.fillStyle = ptColor;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+
       // Cross lines
-      ctx.strokeStyle = ptColor; ctx.lineWidth = 1.5;
+      ctx.strokeStyle = ptColor;
+      ctx.lineWidth = 1.5;
       const cl = 6;
       ctx.beginPath();
       ctx.moveTo(pt.x - r - cl, pt.y); ctx.lineTo(pt.x - r + 3, pt.y);
@@ -297,74 +368,117 @@ const Renderer = (() => {
 
       // Point number
       ctx.font = '700 9px Inter, sans-serif';
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
       ctx.fillText(String(i + 1), pt.x, pt.y - r - 8);
 
-      // Connecting line to next point
-      if (i < points.length - 1) {
-        const next = points[i + 1];
-        ctx.strokeStyle = color; ctx.lineWidth = 2;
-        ctx.shadowColor = color; ctx.shadowBlur = 6;
-        ctx.setLineDash([5, 3]);
-        ctx.beginPath(); ctx.moveTo(pt.x, pt.y); ctx.lineTo(next.x, next.y); ctx.stroke();
-        ctx.setLineDash([]); ctx.shadowBlur = 0;
-
-        // Segment measurement label
-        if (segments && segments[i]) {
-          const mx = (pt.x + next.x) / 2;
-          const my = (pt.y + next.y) / 2;
-          const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
-          const offsetX = Math.sin(angle) * 16;
-          const offsetY = -Math.cos(angle) * 16;
-
-          ctx.font = '700 11px JetBrains Mono, monospace';
-          const tw = ctx.measureText(segments[i]).width;
-          const pw = tw + 12, ph = 18;
-          const lx = mx + offsetX, ly = my + offsetY;
-
-          ctx.fillStyle = 'rgba(4,6,14,.9)';
-          ctx.beginPath();
-          if (ctx.roundRect) ctx.roundRect(lx - pw/2, ly - ph/2, pw, ph, 4);
-          else ctx.rect(lx - pw/2, ly - ph/2, pw, ph);
-          ctx.fill();
-          ctx.strokeStyle = hexRgba(color, 0.5); ctx.lineWidth = 1; ctx.stroke();
-          ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText(segments[i], lx, ly);
-        }
+      // Vertex angle badge
+      if (pt.angle != null) {
+        ctx.font = '700 9px JetBrains Mono, monospace';
+        const aTxt = `${pt.angle}°`;
+        const atw = ctx.measureText(aTxt).width;
+        ctx.fillStyle = 'rgba(4,6,14,.88)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(pt.x + r + 4, pt.y - 8, atw + 8, 16, 3);
+        else ctx.rect(pt.x + r + 4, pt.y - 8, atw + 8, 16);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = '#fbbf24';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(aTxt, pt.x + r + 8, pt.y);
       }
     }
 
-    // Total pill
+    // 4. Total & Area Pill at top
     if (total && points.length >= 2) {
-      ctx.font = '700 14px JetBrains Mono, monospace';
-      const label = `📐 ${total}`;
+      ctx.font = '700 12px JetBrains Mono, monospace';
+      const label = shapeClosed && area ? `🔷 Area: ${area}  ·  Perimeter: ${total}` : `📐 Total: ${total}`;
       const tw = ctx.measureText(label).width;
-      const pw = tw + 20, ph = 28;
-      const tx = canvas.width / 2, ty = 50;
+      const pw = tw + 22, ph = 28;
+      const tx = canvas.width / 2, ty = 46;
 
       ctx.fillStyle = 'rgba(4,6,14,.92)';
-      ctx.shadowColor = color; ctx.shadowBlur = 15;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 15;
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(tx - pw/2, ty - ph/2, pw, ph, 8);
       else ctx.rect(tx - pw/2, ty - ph/2, pw, ph);
       ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
       ctx.fillText(label, tx, ty);
     }
 
-    // Pulsing ring on single point
+    // 5. Single point pulse hint
     if (points.length === 1) {
       const pt = points[0];
       const pulse = (Math.sin(Date.now() / 300) + 1) / 2;
       ctx.strokeStyle = hexRgba('#00e5b3', 0.2 + pulse * 0.3);
       ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, 18 + pulse * 8, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 18 + pulse * 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 6. Close shape hint on point 1 when 3+ points placed
+    if (!shapeClosed && points.length >= 3) {
+      const p1 = points[0];
+      const pulse = (Math.sin(Date.now() / 250) + 1) / 2;
+      ctx.strokeStyle = hexRgba('#fbbf24', 0.4 + pulse * 0.4);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(p1.x, p1.y, 22 + pulse * 6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.font = '600 8px Inter, sans-serif';
+      ctx.fillStyle = '#fbbf24';
+      ctx.textAlign = 'center';
+      ctx.fillText('Tap to Close', p1.x, p1.y + 26);
     }
 
     ctx.restore();
   }
 
-  return { draw, clear, snapshot, syncSize, hitTest, toCanvas, drawMultiPoints };
+  /* ── AR Center Targeting Reticle ── */
+  function drawReticle() {
+    syncSize();
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    ctx.save();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#00e5b3';
+    ctx.shadowColor = '#00e5b3';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.beginPath();
+    ctx.moveTo(cx - 20, cy); ctx.lineTo(cx - 16, cy);
+    ctx.moveTo(cx + 16, cy); ctx.lineTo(cx + 20, cy);
+    ctx.moveTo(cx, cy - 20); ctx.lineTo(cx, cy - 16);
+    ctx.moveTo(cx, cy + 16); ctx.lineTo(cx, cy + 20);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  return { draw, clear, snapshot, syncSize, hitTest, toCanvas, drawMultiPoints, drawReticle };
 })();

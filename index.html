@@ -45,7 +45,7 @@
         </div>
         <div class="instr-step">
           <span class="instr-num">3</span>
-          <div>For <b>big or unknown objects</b>, switch to <b>Manual A→B mode</b> and tap two points to measure any distance.</div>
+          <div>For <b>any object or shape</b>, switch to <b>Manual mode</b>: tap points to measure. Connect back to Point 1 to calculate <b>Area & Angles</b>!</div>
         </div>
         <div class="instr-step">
           <span class="instr-num">4</span>
@@ -104,6 +104,9 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h4m12 0h4M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
         <span id="mode-label" style="font-size:.55rem;font-weight:700;">Auto</span>
       </button>
+      <button class="icon-btn" id="btn-voice" title="Voice readout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
+      </button>
       <button class="icon-btn" id="btn-tips" title="Instructions">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
       </button>
@@ -149,6 +152,10 @@
 
   <!-- Bottom Bar -->
   <div class="bottom-bar">
+    <button class="ctrl-btn" id="btn-undo" title="Undo last point">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13"/></svg>
+      <span>Undo</span>
+    </button>
     <button class="ctrl-btn" id="btn-freeze" title="Pause / Resume">
       <svg id="freeze-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
       <span>Pause</span>
@@ -182,15 +189,29 @@
       <div class="tip-card">
         <div class="tip-num">📐</div>
         <div class="tip-body">
-          <div class="tip-title">Manual A→B Mode</div>
-          <p>For <b>big or unknown objects</b>, tap the mode button to switch to Manual. Then tap Point A and Point B on screen to measure any distance.</p>
+          <div class="tip-title">Continuous Multi-Point & Area</div>
+          <p>Switch to Manual mode and tap any sequence of points. Tap back near <b>Point 1</b> to close the shape and automatically calculate <b>Area ($cm^2$)</b> and <b>Corner Angles ($^\circ$)</b>!</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">📦</div>
+        <div class="tip-body">
+          <div class="tip-title">3D Volume Estimation</div>
+          <p>For 3D objects with depth (bottles, cups, appliances), MeasureAI computes real-world <b>Volume ($cm^3$ or Liters)</b> alongside width and height.</p>
+        </div>
+      </div>
+      <div class="tip-card">
+        <div class="tip-num">🔊</div>
+        <div class="tip-body">
+          <div class="tip-title">Hands-Free Voice Readout</div>
+          <p>Tap the <b>Speaker icon</b> in the top bar to hear voice announcements of measurements as you point and tap.</p>
         </div>
       </div>
       <div class="tip-card">
         <div class="tip-num">ℹ️</div>
         <div class="tip-body">
           <div class="tip-title">Objects Only — No Living Things</div>
-          <p>MeasureAI measures <b>objects only</b>. People and animals are automatically filtered out.</p>
+          <p>MeasureAI measures <b>objects only</b>. People and animals are automatically filtered out for clean results.</p>
         </div>
       </div>
       <div class="tip-card">

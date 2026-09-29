@@ -1,9 +1,15 @@
 /* ════════════════════════════════════════════════════════
-   app.js — AI + AR-Anchored Measurement Controller
+   app.js — Advanced AI Measurement Suite
    
-   Manual mode uses visual feature tracking (anchor.js)
-   to lock points to real-world surfaces. Points follow
-   the surface texture when the camera moves — like ARKit.
+   Features:
+   - AI auto-detect + measure any COCO object
+   - AR-anchored multi-point manual measurement
+   - Close shape → Area + Perimeter calculation
+   - Angle display at vertices
+   - Volume estimation for 3D objects
+   - Voice readout of measurements
+   - Smart level indicator
+   - Undo last point
    ════════════════════════════════════════════════════════ */
 
 (async () => {
@@ -23,11 +29,26 @@
     fps: 0,
     mode: 'auto',
     manualSegments: [],
+    manualAngles: [],
     manualTotal: null,
+    manualArea: null,
+    shapeClosed: false,
+    voiceEnabled: false,
   };
 
   const $ = id => document.getElementById(id);
   const videoEl = document.getElementById('video');
+
+  // ── Voice readout ──
+  function speak(text) {
+    if (!S.voiceEnabled) return;
+    if ('speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.1; u.pitch = 1; u.volume = 0.8;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    }
+  }
 
   const setProgress = (msg, pct) => {
     const m = $('loader-msg'), f = $('loader-fill');
@@ -66,7 +87,7 @@
     }
   }
 
-  /* ── Video ↔ Canvas coordinate conversion ── */
+  /* ── Coordinate conversion ── */
   function canvasToVideo(cx, cy) {
     const canvasEl = document.getElementById('canvas');
     const vw = videoEl.videoWidth || 1, vh = videoEl.videoHeight || 1;
@@ -85,15 +106,41 @@
     return { x: vx * s + ox, y: vy * s + oy };
   }
 
-  /* ── Recalculate manual segments from anchor points ── */
+  /* ── Angle calculation (degrees at vertex B given A-B-C) ── */
+  function angleDeg(ax, ay, bx, by, cx, cy) {
+    const bax = ax - bx, bay = ay - by;
+    const bcx = cx - bx, bcy = cy - by;
+    const dot = bax * bcx + bay * bcy;
+    const cross = bax * bcy - bay * bcx;
+    let angle = Math.atan2(Math.abs(cross), dot) * (180 / Math.PI);
+    return Math.round(angle);
+  }
+
+  /* ── Polygon area (Shoelace formula) in video px² ── */
+  function polygonAreaPx(pts) {
+    let area = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      area += pts[i].vx * pts[j].vy;
+      area -= pts[j].vx * pts[i].vy;
+    }
+    return Math.abs(area) / 2;
+  }
+
+  /* ── Recalculate manual segments, angles, area ── */
   function recalcManual() {
     const info = MeasureEngine.getCalibrationInfo();
     const pts = Anchor.getPoints();
     S.manualSegments = [];
+    S.manualAngles = [];
     let totalMm = 0;
+    const n = pts.length;
+    const loop = S.shapeClosed ? n : n - 1;
 
-    for (let i = 0; i < pts.length - 1; i++) {
-      const distPx = Math.hypot(pts[i+1].vx - pts[i].vx, pts[i+1].vy - pts[i].vy);
+    for (let i = 0; i < loop; i++) {
+      const j = (i + 1) % n;
+      const distPx = Math.hypot(pts[j].vx - pts[i].vx, pts[j].vy - pts[i].vy);
       if (info.calibrated && info.pxPerMm > 0) {
         const mm = distPx / info.pxPerMm;
         totalMm += mm;
@@ -103,20 +150,44 @@
       }
     }
 
-    if (pts.length >= 2) {
+    // Angles at each vertex (need >= 3 points)
+    if (n >= 3) {
+      for (let i = 0; i < n; i++) {
+        const prev = S.shapeClosed ? pts[(i - 1 + n) % n] : (i > 0 ? pts[i - 1] : null);
+        const next = S.shapeClosed ? pts[(i + 1) % n] : (i < n - 1 ? pts[i + 1] : null);
+        if (prev && next) {
+          S.manualAngles[i] = angleDeg(prev.vx, prev.vy, pts[i].vx, pts[i].vy, next.vx, next.vy);
+        } else {
+          S.manualAngles[i] = null;
+        }
+      }
+    }
+
+    if (n >= 2) {
       S.manualTotal = info.calibrated && info.pxPerMm > 0
         ? MeasureEngine.format(totalMm, S.unit)
         : 'Uncalibrated';
     } else {
       S.manualTotal = null;
     }
+
+    // Area (if shape is closed with 3+ points)
+    if (S.shapeClosed && n >= 3 && info.calibrated && info.pxPerMm > 0) {
+      const areaPx2 = polygonAreaPx(pts);
+      const ppm = info.pxPerMm;
+      const areaMm2 = areaPx2 / (ppm * ppm);
+      S.manualArea = MeasureEngine.formatArea(areaMm2, S.unit);
+    } else {
+      S.manualArea = null;
+    }
   }
 
-  /* ── Get canvas-coord points with confidence for renderer ── */
-  function getCanvasPointsWithConf() {
-    return Anchor.getPoints().map(p => {
+  /* ── Get canvas-coord points with confidence + angles for renderer ── */
+  function getCanvasPointsWithMeta() {
+    const pts = Anchor.getPoints();
+    return pts.map((p, i) => {
       const c = videoToCanvas(p.vx, p.vy);
-      return { x: c.x, y: c.y, conf: p.confidence };
+      return { x: c.x, y: c.y, conf: p.confidence, angle: S.manualAngles[i] || null };
     });
   }
 
@@ -133,7 +204,6 @@
     return;
   }
 
-  // Initialize visual anchor tracker
   Anchor.init(videoEl);
 
   /* ═══════════════════════════════════
@@ -146,7 +216,7 @@
     modelOk = true;
     setProgress('AI ready ✓', 95);
   } catch (err) {
-    setProgress('⚠️ Model failed — check connection', 0);
+    setProgress('⚠️ Model failed', 0);
     const f = $('loader-fill'); if (f) f.style.background = '#f87171';
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -176,7 +246,6 @@
   Detector.startLoop(preds => {
     if (S.frozen) return;
 
-    // FPS
     fc++;
     const now = performance.now();
     if (now - fpsT >= 500) {
@@ -186,23 +255,20 @@
       fc = 0; fpsT = now;
     }
 
-    // Calibrate
     const { w, h } = Camera.getDims();
     MeasureEngine.calibrate(preds, w || vidW, h || vidH);
     updateCalibBadge();
 
-    // ── Visual feature tracking: update anchored points ──
+    // Visual feature tracking
     if (S.mode === 'manual' && Anchor.count() > 0) {
       Anchor.updateAll();
     }
 
-    // Prune dead selections
     const liveIds = new Set(preds.map(p => p.trackId));
     for (const tid of S.selectedTrackIds) {
       if (!liveIds.has(tid)) S.selectedTrackIds.delete(tid);
     }
 
-    // Build items
     const items = preds.map(pred => ({
       label:       pred.class,
       bbox:        pred.bbox,
@@ -214,15 +280,18 @@
     }));
 
     S.lastDetections = items;
-
-    // Draw AI detections
     Renderer.draw(items, S.unit);
 
-    // Draw AR-anchored manual points
-    if (S.mode === 'manual' && Anchor.count() > 0) {
+    // Draw AR-anchored manual overlay
+    if (S.mode === 'manual') {
       recalcManual();
-      const canvasPts = getCanvasPointsWithConf();
-      Renderer.drawMultiPoints(canvasPts, S.manualSegments, S.manualTotal, '#fbbf24');
+      if (Anchor.count() > 0) {
+        const canvasPts = getCanvasPointsWithMeta();
+        Renderer.drawMultiPoints(canvasPts, S.manualSegments, S.manualTotal, '#fbbf24',
+          S.shapeClosed, S.manualArea);
+      }
+      // Draw center crosshair reticle
+      Renderer.drawReticle();
     }
 
     // Cards
@@ -236,7 +305,9 @@
     // Status
     if (S.mode === 'manual') {
       const n = Anchor.count();
-      if (n >= 2) {
+      if (S.shapeClosed) {
+        setStatus(`Closed shape · ${S.manualArea || S.manualTotal}`, 'live');
+      } else if (n >= 2) {
         setStatus(`${n} anchored · ${S.manualTotal || '—'}`, 'live');
       } else if (n === 1) {
         setStatus('Tap next point', 'live');
@@ -276,20 +347,52 @@
 
     const px = cx - rect.left, py = cy - rect.top;
 
-    // ── Manual mode: anchor point to surface ──
+    // ── Manual mode ──
     if (S.mode === 'manual') {
+      if (S.shapeClosed) {
+        // Shape is closed, tap to reset
+        Anchor.clear(); S.shapeClosed = false;
+        S.manualSegments = []; S.manualAngles = [];
+        S.manualTotal = null; S.manualArea = null;
+        toast('Shape cleared — tap to start new', '', 1200);
+        return;
+      }
+
       try { navigator.vibrate?.(25); } catch {}
 
       const vidPt = canvasToVideo(px, py);
+
+      // Check if tapping near first point to close shape (need 3+ points)
+      if (Anchor.count() >= 3) {
+        const pts = Anchor.getPoints();
+        const first = pts[0];
+        const firstCanvas = videoToCanvas(first.vx, first.vy);
+        const dist = Math.hypot(px - firstCanvas.x, py - firstCanvas.y);
+        if (dist < 35) {
+          // Close the shape!
+          S.shapeClosed = true;
+          recalcManual();
+          try { navigator.vibrate?.([30, 50, 30]); } catch {}
+          toast(`🔷 Shape closed! Area: ${S.manualArea || '—'}`, 's', 3000);
+          speak(`Shape closed. Area is ${S.manualArea || 'unknown'}`);
+          return;
+        }
+      }
+
       Anchor.placePoint(vidPt.vx, vidPt.vy);
       recalcManual();
 
       const n = Anchor.count();
       if (n === 1) {
-        toast('📌 Point anchored — tap next', 's', 1500);
+        toast('📌 Point anchored — keep tapping', 's', 1500);
+        speak('Point 1 anchored');
       } else {
         const lastSeg = S.manualSegments[S.manualSegments.length - 1];
         toast(`📐 Segment ${n-1}: ${lastSeg}`, 's', 2000);
+        speak(`Segment ${n-1}, ${lastSeg}`);
+        if (n >= 3) {
+          toast('Tap near point 1 to close shape', '', 2500);
+        }
       }
       return;
     }
@@ -307,7 +410,9 @@
         const m = hit.measurement;
         const w = MeasureEngine.format(m.widthMm, S.unit);
         const h = MeasureEngine.format(m.heightMm, S.unit);
+        const vol = MeasureEngine.formatVolume(m.volumeCm3);
         toast(`📏 ${hit.label}: ${w} × ${h}`, 's', 2500);
+        speak(`${hit.label}, ${w} by ${h}${vol ? `, volume ${vol}` : ''}`);
       }
     } else {
       if (S.selectedTrackIds.size > 0) {
@@ -343,6 +448,8 @@
       const meas = m.measurement;
       const wLbl = MeasureEngine.format(meas.widthMm, S.unit);
       const hLbl = MeasureEngine.format(meas.heightMm, S.unit);
+      const vol  = MeasureEngine.formatVolume(meas.volumeCm3);
+      const dist = meas.distanceCm ? MeasureEngine.formatDist(meas.distanceCm) : null;
       const conf = Math.round(m.score * 100);
       const cls  = conf >= 70 ? 'high' : conf >= 45 ? 'med' : 'low';
       const locked = m.age >= 15;
@@ -365,6 +472,9 @@
         <div class="mcard-dims">
           <div class="mcard-dim"><span class="dim-lbl">W</span>${wLbl}</div>
           <div class="mcard-dim"><span class="dim-lbl">H</span>${hLbl}</div>
+          ${meas.depthMm ? `<div class="mcard-dim"><span class="dim-lbl">D</span>${MeasureEngine.format(meas.depthMm, S.unit)}</div>` : ''}
+          ${vol ? `<div class="mcard-dim" style="color:var(--a)"><span class="dim-lbl">📦</span>${vol}</div>` : ''}
+          ${dist ? `<div class="mcard-dim" style="color:var(--txt2);font-size:.68rem"><span class="dim-lbl">📏</span>${dist}</div>` : ''}
         </div>
       `;
     });
@@ -401,10 +511,10 @@
 
     card.innerHTML = `
       <div class="mcard-hdr">
-        <span class="mcard-emoji">📐</span>
-        <span class="mcard-conf-chip med">${n} pts</span>
+        <span class="mcard-emoji">${S.shapeClosed ? '🔷' : '📐'}</span>
+        <span class="mcard-conf-chip ${S.shapeClosed ? 'high' : 'med'}">${S.shapeClosed ? 'Closed' : `${n} pts`}</span>
       </div>
-      <div class="mcard-label">Total: <b>${S.manualTotal || '—'}</b></div>
+      <div class="mcard-label">${S.shapeClosed ? `Area: <b>${S.manualArea || '—'}</b> · ` : ''}Total: <b>${S.manualTotal || '—'}</b></div>
       <div class="mcard-dims">${segHtml}</div>
     `;
   }
@@ -417,22 +527,49 @@
   $('btn-mode').addEventListener('click', () => {
     if (S.mode === 'auto') {
       S.mode = 'manual';
-      Anchor.clear();
+      Anchor.clear(); S.shapeClosed = false;
       Anchor.requestGyroPermission();
-      S.manualSegments = []; S.manualTotal = null;
+      S.manualSegments = []; S.manualAngles = [];
+      S.manualTotal = null; S.manualArea = null;
       S.selectedTrackIds.clear();
       $('mode-label').textContent = 'A→B';
       $('btn-mode').classList.add('mode-active');
-      toast('📌 AR Anchor mode — points lock to surfaces', 's', 2500);
+      toast('📌 AR mode — tap surfaces to measure', 's', 2500);
+      speak('Manual measurement mode');
     } else {
       S.mode = 'auto';
-      Anchor.clear();
-      S.manualSegments = []; S.manualTotal = null;
+      Anchor.clear(); S.shapeClosed = false;
+      S.manualSegments = []; S.manualAngles = [];
+      S.manualTotal = null; S.manualArea = null;
       $('mode-label').textContent = 'Auto';
       $('btn-mode').classList.remove('mode-active');
       toast('AI Auto mode', '', 1500);
     }
   });
+
+  // Voice toggle
+  const voiceBtn = $('btn-voice');
+  if (voiceBtn) {
+    voiceBtn.addEventListener('click', () => {
+      S.voiceEnabled = !S.voiceEnabled;
+      voiceBtn.classList.toggle('mode-active', S.voiceEnabled);
+      toast(S.voiceEnabled ? '🔊 Voice on' : '🔇 Voice off', '', 1200);
+      if (S.voiceEnabled) speak('Voice enabled');
+    });
+  }
+
+  // Undo last point
+  const undoBtn = $('btn-undo');
+  if (undoBtn) {
+    undoBtn.addEventListener('click', () => {
+      if (S.mode === 'manual' && Anchor.count() > 0) {
+        S.shapeClosed = false;
+        Anchor.undoLast();
+        recalcManual();
+        toast(`Undo — ${Anchor.count()} points`, '', 1200);
+      }
+    });
+  }
 
   // Unit toggle
   $('btn-unit').addEventListener('click', () => {
@@ -450,7 +587,9 @@
       await Camera.flip();
       MeasureEngine.reset(); Detector.resetTracks();
       S.selectedTrackIds.clear();
-      Anchor.clear(); S.manualSegments = []; S.manualTotal = null;
+      Anchor.clear(); S.shapeClosed = false;
+      S.manualSegments = []; S.manualAngles = [];
+      S.manualTotal = null; S.manualArea = null;
       setStatus('Point camera & tap any object', 'live');
     } catch { toast('Cannot flip', 'e'); }
   });
@@ -476,8 +615,10 @@
   // Clear
   $('btn-reset').addEventListener('click', () => {
     if (S.mode === 'manual') {
-      Anchor.clear(); S.manualSegments = []; S.manualTotal = null;
-      toast('Anchors cleared', '', 1200);
+      Anchor.clear(); S.shapeClosed = false;
+      S.manualSegments = []; S.manualAngles = [];
+      S.manualTotal = null; S.manualArea = null;
+      toast('Cleared', '', 1200);
     } else {
       S.selectedTrackIds.clear(); MeasureEngine.reset(); Detector.resetTracks();
       updateCalibBadge(); toast('Cleared', '', 1200);
@@ -503,7 +644,9 @@
     S.history.unshift({ img: imgUrl, ts });
     const hl = $('history-list'), empty = hl.querySelector('.hist-empty');
     if (empty) empty.remove();
-    const label = S.mode === 'manual' ? `📐 Manual: ${S.manualTotal}` : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
+    const label = S.mode === 'manual'
+      ? `${S.shapeClosed ? '🔷' : '📐'} ${S.shapeClosed ? S.manualArea : S.manualTotal}`
+      : (top ? `${top.measurement.emoji} ${top.label}` : 'Snap');
     const dims = S.mode === 'manual' ? `${Anchor.count()} pts · ${S.manualTotal}` :
       (top ? `${MeasureEngine.format(top.measurement.widthMm, S.unit)} × ${MeasureEngine.format(top.measurement.heightMm, S.unit)}` : '—');
     const li = document.createElement('li');
@@ -519,5 +662,5 @@
     requestAnimationFrame(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); });
   }
 
-  console.log('[MeasureAI] ✓ AR Anchor tracking active');
+  console.log('[MeasureAI] ✓ Advanced AI + AR Measurement Suite ready');
 })();

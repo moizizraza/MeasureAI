@@ -192,9 +192,11 @@ const MeasureEngine = (() => {
       confScore:  pred.score,
       widthMm:    smoothed.w,
       heightMm:   smoothed.h,
+      depthMm:    dim.d || null,
       distanceCm: smoothed.dist,
       pxPerMm:    effectivePxPerMm,
       knownDim:   dim,
+      volumeCm3:  dim.d ? (smoothed.w * smoothed.h * dim.d) / 1000 : null,
     };
   }
 
@@ -263,6 +265,20 @@ const MeasureEngine = (() => {
     return `${(cm / 100).toFixed(1)} m away`;
   }
 
+  function formatArea(mm2, unit = 'cm') {
+    if (!mm2 || isNaN(mm2)) return '—';
+    if (unit === 'cm')  return `${(mm2 / 100).toFixed(1)} cm²`;
+    if (unit === 'in')  return `${(mm2 / 645.16).toFixed(2)} in²`;
+    if (unit === 'mm')  return `${Math.round(mm2)} mm²`;
+    return `${(mm2 / 100).toFixed(1)} cm²`;
+  }
+
+  function formatVolume(cm3) {
+    if (!cm3 || isNaN(cm3)) return null;
+    if (cm3 < 1000) return `${cm3.toFixed(0)} cm³`;
+    return `${(cm3 / 1000).toFixed(1)} L`;
+  }
+
   function reset() {
     calibrationHistory = [];
     globalPxPerMm = null;
@@ -295,6 +311,8 @@ const MeasureEngine = (() => {
     calibrate,
     format,
     formatDist,
+    formatArea,
+    formatVolume,
     reset,
     getCalibrationInfo,
     getEmoji,
