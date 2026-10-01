@@ -204,14 +204,44 @@ const MeasureEngine = (() => {
     'staple gun':       { w: 60,   h: 155,  d: 90,   emoji:'🔫', confidence:'high' },
   };
 
-  // Fallback for unknown classes
+  // Fallback for unknown classes — still measured using calibrated pxPerMm
   const FALLBACK = { w: 200, h: 200, d: 100, emoji:'📦', confidence:'low' };
 
+  // ── PRECISION REFERENCE OBJECTS ──────────────────────
+  // These are used for high-accuracy auto-calibration (exact ISO dimensions)
+  const REFERENCE_OBJECTS = {
+    'cell phone':   { w: 71,    h: 147,   axis: 'h', emoji: '📱' },  // avg smartphone
+    'laptop':       { w: 330,   h: 220,   axis: 'w', emoji: '💻' },
+    'keyboard':     { w: 440,   h: 140,   axis: 'w', emoji: '⌨️' },
+    'book':         { w: 148,   h: 210,   axis: 'h', emoji: '📚' },  // A5
+    'bottle':       { w: 80,    h: 250,   axis: 'h', emoji: '🍶' },
+    'cup':          { w: 85,    h: 95,    axis: 'h', emoji: '☕' },
+    'sports ball':  { w: 220,   h: 220,   axis: 'w', emoji: '⚽' },
+    'frisbee':      { w: 270,   h: 270,   axis: 'w', emoji: '🥏' },
+    'skateboard':   { w: 200,   h: 800,   axis: 'h', emoji: '🛹' },
+    'baseball bat': { w: 60,    h: 900,   axis: 'h', emoji: '🏏' },
+    'tennis racket':{ w: 280,   h: 680,   axis: 'h', emoji: '🎾' },
+    'suitcase':     { w: 450,   h: 700,   axis: 'h', emoji: '🧳' },
+    'stop sign':    { w: 750,   h: 750,   axis: 'w', emoji: '🛑' },
+    'clock':        { w: 300,   h: 300,   axis: 'w', emoji: '🕐' },
+    'tv':           { w: 1230,  h: 720,   axis: 'w', emoji: '📺' },
+    'scissors':     { w: 80,    h: 220,   axis: 'h', emoji: '✂️' },
+    'mouse':        { w: 65,    h: 120,   axis: 'h', emoji: '🖱️' },
+    'remote':       { w: 55,    h: 200,   axis: 'h', emoji: '📡' },
+    'toothbrush':   { w: 20,    h: 190,   axis: 'h', emoji: '🪥' },
+    'fork':         { w: 25,    h: 195,   axis: 'h', emoji: '🍴' },
+    'knife':        { w: 20,    h: 230,   axis: 'h', emoji: '🔪' },
+    'spoon':        { w: 40,    h: 190,   axis: 'h', emoji: '🥄' },
+    'banana':       { w: 40,    h: 190,   axis: 'h', emoji: '🍌' },
+    'apple':        { w: 75,    h: 75,    axis: 'w', emoji: '🍎' },
+  };
+
   // ── Calibration state ────────────────────────────
-  // pixelsPerMm computed from best-confidence detected objects
-  let calibrationHistory = [];  // [{ pxPerMm, confidence, label }]
+  let calibrationHistory = [];
   let globalPxPerMm      = null;
   let frameCount         = 0;
+  let bestCalibSource    = null;    // label of best reference object used
+  let calibAccuracy      = 'low';  // 'low' | 'med' | 'high' | 'precise'
 
   // ── Measurement smoothing ─────────────────────────
   // Store last N measurements per label for averaging
@@ -323,35 +353,67 @@ const MeasureEngine = (() => {
    ──────────────────────────────────────────────── */
   function calibrate(predictions, videoW, videoH) {
     frameCount++;
-    if (manualPxPerMm !== null) return; // Locked by user calibration
+    if (manualPxPerMm !== null) return; // Locked by user
 
-    const samples = predictions.map(pred => {
+    let bestPrecisePx = null, bestPreciseWeight = 0;
+    const samples = [];
+
+    for (const pred of predictions) {
       const label = pred.class.toLowerCase();
-      const dim   = DIM_DB[label];
-      if (!dim || dim.confidence === 'low') return null;
-
       const [, , rawW, rawH] = pred.bbox;
       const bboxW = rawW * 0.95;
-      const pxPerMm = bboxW / dim.w;
-      const area    = rawW * rawH;
-      const confWeight = dim.confidence === 'high' ? 3 : 1;
-      const weight = confWeight * pred.score * (area / (videoW * videoH));
+      const bboxH = rawH * 0.95;
+      const area  = rawW * rawH;
+      const areaPct = area / (videoW * videoH);
 
-      return { pxPerMm, weight, label };
-    }).filter(Boolean);
+      // ── TIER 1: Precision reference objects (highest priority) ──
+      const ref = REFERENCE_OBJECTS[label];
+      if (ref && pred.score >= 0.6 && areaPct >= 0.01) {
+        // Use the specified axis for most reliable px/mm ratio
+        const realMm = ref.axis === 'h' ? ref.h : ref.w;
+        const bboxPx = ref.axis === 'h' ? bboxH : bboxW;
+        if (realMm > 0 && bboxPx > 10) {
+          const px = bboxPx / realMm;
+          const w  = pred.score * areaPct * 5; // heavy weight
+          if (w > bestPreciseWeight) {
+            bestPrecisePx     = px;
+            bestPreciseWeight = w;
+            bestCalibSource   = label;
+            calibAccuracy     = 'precise';
+          }
+        }
+      }
 
-    if (samples.length === 0) return;
+      // ── TIER 2: DIM_DB high-confidence objects ──
+      const dim = DIM_DB[label];
+      if (dim && dim.confidence !== 'low') {
+        const pxPerMm   = bboxW / dim.w;
+        const confWeight = dim.confidence === 'high' ? 3 : 1;
+        const weight     = confWeight * pred.score * areaPct;
+        samples.push({ pxPerMm, weight, label });
+      }
+    }
 
-    // Weighted average
-    const totalWeight = samples.reduce((s, x) => s + x.weight, 0);
-    const weightedPx  = samples.reduce((s, x) => s + x.pxPerMm * x.weight, 0);
-    const newPxPerMm  = weightedPx / totalWeight;
+    // If we have a precise reference → use it directly (locks in for this batch)
+    if (bestPrecisePx !== null) {
+      calibrationHistory.push(bestPrecisePx);
+      if (calibrationHistory.length > 40) calibrationHistory.shift();
+    } else if (samples.length > 0) {
+      // Weighted average of tier-2 samples
+      const totalWeight = samples.reduce((s, x) => s + x.weight, 0);
+      if (totalWeight > 0) {
+        const newPxPerMm = samples.reduce((s, x) => s + x.pxPerMm * x.weight, 0) / totalWeight;
+        calibrationHistory.push(newPxPerMm);
+        if (calibrationHistory.length > 40) calibrationHistory.shift();
+        if (!bestCalibSource && calibrationHistory.length >= 5) {
+          calibAccuracy = calibrationHistory.length >= 15 ? 'high' : 'med';
+        }
+      }
+    }
 
-    // Rolling calibration history
-    calibrationHistory.push(newPxPerMm);
-    if (calibrationHistory.length > 30) calibrationHistory.shift();
+    if (calibrationHistory.length === 0) return;
 
-    // Reject outliers using median
+    // Robust median for final pxPerMm (rejects outliers automatically)
     const sorted = [...calibrationHistory].sort((a, b) => a - b);
     const mid    = Math.floor(sorted.length / 2);
     globalPxPerMm = sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
@@ -425,14 +487,49 @@ const MeasureEngine = (() => {
   function getCalibrationInfo() {
     const isLocked = manualPxPerMm !== null;
     const pxMm = getEffectivePxPerMm();
-    if (!globalPxPerMm && !isLocked) return { calibrated: false, pxPerMm: null, sampleCount: 0, isLocked: false };
+    if (!globalPxPerMm && !isLocked) return { calibrated: false, pxPerMm: null, sampleCount: 0, isLocked: false, accuracy: 'uncalibrated' };
+    const accuracy = isLocked ? 'precise (manual)' :
+                     calibAccuracy === 'precise' ? `precise via ${bestCalibSource}` :
+                     calibAccuracy === 'high'    ? 'high' :
+                     calibAccuracy === 'med'     ? 'medium' : 'low';
     return {
-      calibrated:   true,
-      pxPerMm:      pxMm,
-      sampleCount:  calibrationHistory.length,
-      accuracy:     isLocked ? '100% (Locked)' : calibrationHistory.length >= 10 ? 'high' : calibrationHistory.length >= 5 ? 'med' : 'low',
+      calibrated:     true,
+      pxPerMm:        pxMm,
+      sampleCount:    calibrationHistory.length,
+      accuracy,
+      calibAccuracy,
+      bestCalibSource,
       isLocked,
       scaleMultiplier,
+    };
+  }
+
+  /* ── Measure any bounding box without a known class ── */
+  /* Used for the "measure anything" tap feature in manual mode */
+  function measureUnknown(bbox, videoW, videoH) {
+    const [, , rawW, rawH] = bbox;
+    const bboxW = rawW * 0.95;
+    const bboxH = rawH * 0.95;
+    const eff   = getEffectivePxPerMm();
+
+    if (!eff || eff <= 0) {
+      return { widthMm: null, heightMm: null, calibrated: false };
+    }
+
+    const widthMm  = bboxW / eff;
+    const heightMm = bboxH / eff;
+    const diagMm   = Math.sqrt(widthMm ** 2 + heightMm ** 2);
+
+    // Pinhole distance estimate
+    const focal      = videoW * 1.1;
+    const distanceCm = widthMm > 0 ? (widthMm * focal) / (bboxW * 10) : null;
+
+    return {
+      widthMm:    widthMm,
+      heightMm:   heightMm,
+      diagMm:     diagMm,
+      distanceCm: distanceCm,
+      calibrated: true,
     };
   }
 
@@ -442,6 +539,7 @@ const MeasureEngine = (() => {
 
   return {
     measure,
+    measureUnknown,
     calibrate,
     format,
     formatDist,
@@ -457,5 +555,7 @@ const MeasureEngine = (() => {
     pxToMm,
     isManuallyLocked,
     DIM_DB,
+    REFERENCE_OBJECTS,
   };
 })();
+

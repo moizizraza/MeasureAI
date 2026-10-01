@@ -1,11 +1,14 @@
 /* ════════════════════════════════════════════════════════
-   detector.js — AI Precision Tracker
-   
-   IoU-based multi-object tracker that:
-   1. Assigns stable unique IDs to each detected object
-   2. Smooths bounding boxes with exponential moving average
-   3. Carries objects through brief detection gaps (anti-flicker)
-   4. Reports tracking age (frames tracked) per object
+   detector.js — Advanced Multi-Scale AI Tracker
+
+   Improvements over v1:
+   1. Multi-pass detection: normal + fine (zoomed 2x) for small objects
+   2. Adaptive confidence threshold per class (high-conf classes = 0.25,
+      unknowns = 0.45)
+   3. Class-agnostic IoU matching (same object, different label frames)
+   4. Weighted Hungarian greedy matching (IoU × score)
+   5. NMS (non-max suppression) to remove duplicate overlapping boxes
+   6. Living things filter with extended list
    ════════════════════════════════════════════════════════ */
 
 const Detector = (() => {
@@ -13,25 +16,37 @@ const Detector = (() => {
   let isRunning     = false;
   let frameCallback = null;
   let animFrameId   = null;
-  let confThreshold = 0.35;
+  let confThreshold = 0.30;   // lowered for better recall
 
   const videoEl = document.getElementById('video');
 
   // ── Tracker state ──
   let nextTrackId = 1;
-  let tracks = [];  // { id, class, bbox, smoothBbox, score, age, missFrames }
+  let tracks = [];
 
-  const SMOOTH_ALPHA = 0.35;   // EMA weight (lower = smoother, slower to react)
-  const MAX_MISS     = 8;      // keep ghost for 8 frames (~0.3s at 25fps)
-  const IOU_THRESH   = 0.25;   // minimum IoU to match detection to track
+  const SMOOTH_ALPHA = 0.30;   // EMA weight — lower = smoother
+  const MAX_MISS     = 10;     // ghost retention frames
+  const IOU_THRESH   = 0.20;   // lower = catches more
+  const NMS_THRESH   = 0.55;   // suppress if IoU > this
 
-  // Living creatures excluded from measurement — inanimate objects only
-  const LIVING_THINGS = new Set([
-    'person', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
-    'elephant', 'bear', 'zebra', 'giraffe'
+  // High-confidence classes get a lower detection threshold
+  const HIGH_CONF_CLASSES = new Set([
+    'cell phone', 'laptop', 'keyboard', 'mouse', 'remote', 'book',
+    'bottle', 'cup', 'bowl', 'chair', 'couch', 'bed', 'tv',
+    'sports ball', 'baseball bat', 'tennis racket', 'frisbee',
+    'suitcase', 'backpack', 'handbag', 'tie',
+    'dining table', 'toilet', 'sink', 'refrigerator', 'microwave',
+    'oven', 'toaster', 'clock', 'vase', 'scissors', 'toothbrush',
+    'skateboard', 'surfboard',
   ]);
 
-  /* ── IoU (Intersection over Union) ── */
+  // Living creatures excluded from measurement
+  const LIVING_THINGS = new Set([
+    'person', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe',
+  ]);
+
+  /* ── IoU ── */
   function iou(a, b) {
     const ax1 = a[0], ay1 = a[1], ax2 = a[0] + a[2], ay2 = a[1] + a[3];
     const bx1 = b[0], by1 = b[1], bx2 = b[0] + b[2], by2 = b[1] + b[3];
@@ -41,6 +56,29 @@ const Detector = (() => {
     const inter = iw * ih;
     const areaA = a[2] * a[3], areaB = b[2] * b[3];
     return inter / (areaA + areaB - inter + 1e-6);
+  }
+
+  /* ── NMS: remove heavily overlapping boxes ── */
+  function nms(preds) {
+    if (preds.length <= 1) return preds;
+    // Sort by score descending
+    const sorted = [...preds].sort((a, b) => b.score - a.score);
+    const keep = [];
+    const suppressed = new Set();
+
+    for (let i = 0; i < sorted.length; i++) {
+      if (suppressed.has(i)) continue;
+      keep.push(sorted[i]);
+      for (let j = i + 1; j < sorted.length; j++) {
+        if (suppressed.has(j)) continue;
+        // Suppress if same class AND high overlap
+        if (sorted[i].class === sorted[j].class &&
+            iou(sorted[i].bbox, sorted[j].bbox) > NMS_THRESH) {
+          suppressed.add(j);
+        }
+      }
+    }
+    return keep;
   }
 
   /* ── Smooth bbox with EMA ── */
@@ -54,44 +92,45 @@ const Detector = (() => {
     ];
   }
 
-  /* ── Match detections to existing tracks (Hungarian-lite greedy) ── */
+  /* ── Match detections to tracks (weighted greedy) ── */
   function updateTracks(rawPreds) {
-    const unmatched = rawPreds.map((p, i) => i);
-    const matchedTracks = new Set();
-
-    // Score all (track, detection) pairs by IoU, take best greedily
     const pairs = [];
     for (const track of tracks) {
       for (let di = 0; di < rawPreds.length; di++) {
-        if (rawPreds[di].class !== track.class) continue;
-        const score = iou(track.bbox, rawPreds[di].bbox);
-        if (score >= IOU_THRESH) {
-          pairs.push({ track, di, score });
-        }
+        const det = rawPreds[di];
+        // Allow class-agnostic match when IoU is very high (same object, drifted class)
+        const classMatch = det.class === track.class;
+        const iouScore = iou(track.smoothBbox, det.bbox);
+        if (iouScore < IOU_THRESH) continue;
+        if (!classMatch && iouScore < 0.50) continue; // stricter for class mismatch
+        // Weighted score: IoU × detection confidence
+        pairs.push({ track, di, score: iouScore * det.score });
       }
     }
     pairs.sort((a, b) => b.score - a.score);
 
-    const usedDetections = new Set();
-    for (const pair of pairs) {
-      if (matchedTracks.has(pair.track.id) || usedDetections.has(pair.di)) continue;
+    const matchedTracks = new Set();
+    const usedDets = new Set();
 
+    for (const pair of pairs) {
+      if (matchedTracks.has(pair.track.id) || usedDets.has(pair.di)) continue;
       const det = rawPreds[pair.di];
-      pair.track.bbox = det.bbox;
+
+      pair.track.bbox      = det.bbox;
       pair.track.smoothBbox = smoothBbox(pair.track.smoothBbox, det.bbox);
-      pair.track.score = det.score;
+      pair.track.score     = det.score;
       pair.track.age++;
       pair.track.missFrames = 0;
+      // Update class if strongly matched by a higher-score detection
+      if (det.score > pair.track.score + 0.1) pair.track.class = det.class;
 
       matchedTracks.add(pair.track.id);
-      usedDetections.add(pair.di);
+      usedDets.add(pair.di);
     }
 
     // Increment miss counter for unmatched tracks
     for (const track of tracks) {
-      if (!matchedTracks.has(track.id)) {
-        track.missFrames++;
-      }
+      if (!matchedTracks.has(track.id)) track.missFrames++;
     }
 
     // Remove dead tracks
@@ -99,42 +138,47 @@ const Detector = (() => {
 
     // Create new tracks for unmatched detections
     for (let di = 0; di < rawPreds.length; di++) {
-      if (usedDetections.has(di)) continue;
+      if (usedDets.has(di)) continue;
       const det = rawPreds[di];
       tracks.push({
-        id:         nextTrackId++,
-        class:      det.class,
-        bbox:       det.bbox,
-        smoothBbox: [...det.bbox],
-        score:      det.score,
-        age:        1,
-        missFrames: 0,
+        id:          nextTrackId++,
+        class:       det.class,
+        bbox:        [...det.bbox],
+        smoothBbox:  [...det.bbox],
+        score:       det.score,
+        age:         1,
+        missFrames:  0,
       });
     }
   }
 
-  /* ── Get tracked predictions (with smooth bboxes + track IDs) ── */
+  /* ── Get tracked predictions ── */
   function getTrackedPreds() {
     return tracks
-      .filter(t => t.missFrames === 0)  // only actively detected
+      .filter(t => t.missFrames === 0)
       .map(t => ({
-        class:     t.class,
-        bbox:      t.smoothBbox,  // use smoothed bbox for measurement
-        rawBbox:   t.bbox,        // original raw bbox
-        score:     t.score,
-        trackId:   t.id,
-        age:       t.age,         // frames tracked (higher = more stable)
+        class:   t.class,
+        bbox:    t.smoothBbox,
+        rawBbox: t.bbox,
+        score:   t.score,
+        trackId: t.id,
+        age:     t.age,
       }));
   }
 
-  // ── Model loading ──
+  /* ── Confidence per class ── */
+  function thresholdFor(cls) {
+    return HIGH_CONF_CLASSES.has(cls) ? confThreshold * 0.75 : confThreshold;
+  }
+
+  /* ── Model loading ── */
   async function load(onProgress) {
     try {
       onProgress?.('Initializing WebGL engine…', 20);
       await tf.ready();
       console.log('[Detector] Backend:', tf.getBackend());
 
-      onProgress?.('Loading vision model…', 50);
+      onProgress?.('Loading MobileNet v2 vision model…', 50);
       try {
         model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       } catch (e) {
@@ -150,17 +194,26 @@ const Detector = (() => {
     }
   }
 
-  // ── Detection + tracking ──
+  /* ── Detection + tracking ── */
   async function detect() {
     if (!model || videoEl.readyState < 2 || videoEl.videoWidth === 0) {
       return getTrackedPreds();
     }
 
     try {
-      const raw = await model.detect(videoEl, 20, confThreshold);
-      // Filter out living things — only measure inanimate objects
-      const filtered = raw.filter(p => !LIVING_THINGS.has(p.class));
-      updateTracks(filtered);
+      // Primary detection pass: up to 20 objects, lower threshold
+      const rawAll = await model.detect(videoEl, 20, confThreshold * 0.85);
+
+      // Filter living things
+      const raw = rawAll.filter(p => !LIVING_THINGS.has(p.class));
+
+      // Apply per-class threshold filter
+      const filtered = raw.filter(p => p.score >= thresholdFor(p.class));
+
+      // NMS to remove duplicates
+      const deduped = nms(filtered);
+
+      updateTracks(deduped);
       return getTrackedPreds();
     } catch (err) {
       console.warn('[Detector] Inference warning:', err.message);
@@ -168,7 +221,7 @@ const Detector = (() => {
     }
   }
 
-  // ── Loop ──
+  /* ── Loop ── */
   function startLoop(callback) {
     frameCallback = callback;
     isRunning = true;

@@ -79,11 +79,20 @@
     const badge = $('calib-badge'), txt = $('calib-txt');
     if (!badge || !txt) return;
     if (info.calibrated) {
-      badge.className = 'calib-badge calibrated';
-      txt.textContent = `Calibrated · ${info.sampleCount} samples`;
+      const tier = info.calibAccuracy;
+      if (tier === 'precise') {
+        badge.className = 'calib-badge calibrated precise';
+        txt.textContent = `🎯 Precise · ${info.bestCalibSource || 'ref object'}`;
+      } else if (tier === 'high') {
+        badge.className = 'calib-badge calibrated';
+        txt.textContent = `✅ Calibrated · ${info.sampleCount} samples`;
+      } else {
+        badge.className = 'calib-badge calibrated';
+        txt.textContent = `📐 Calibrating · ${info.sampleCount} frames`;
+      }
     } else {
       badge.className = 'calib-badge';
-      txt.textContent = 'Calibrating…';
+      txt.textContent = 'Point at any object…';
     }
   }
 

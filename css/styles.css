@@ -275,6 +275,15 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;}
 .calib-badge svg{width:13px;height:13px;color:var(--w);flex-shrink:0;}
 .calib-badge.calibrated svg{color:var(--a);}
 .calib-badge.calibrated{border-color:rgba(0,229,179,.3);color:var(--a);}
+.calib-badge.precise{
+  border-color:rgba(251,191,36,.6);color:#fbbf24;
+  box-shadow:0 0 12px rgba(251,191,36,.2);
+  animation:precise-pulse 2s ease-in-out infinite;
+}
+@keyframes precise-pulse{
+  0%,100%{box-shadow:0 0 8px rgba(251,191,36,.15);}
+  50%{box-shadow:0 0 20px rgba(251,191,36,.4);}
+}
 
 /* Object count badge */
 .obj-count{
