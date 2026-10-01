@@ -1,275 +1,420 @@
-/* ════════════════════════════════════════════════════════
-   anchor.js — Visual Feature Anchor System (ARKit-like)
-   
-   Each placed point captures a visual "fingerprint" (template)
-   from the video feed. Every frame, template matching finds
-   where that surface patch moved to — keeping points locked
-   to the real-world surface even as the camera moves.
-   
-   Combines:
-   1. Per-point template matching (primary)
-   2. Gyroscope/device motion (fast motion assist)
-   3. Object-anchor fallback (when visual match fails)
-   ════════════════════════════════════════════════════════ */
+/**
+ * anchor.js — Lucas-Kanade Optical Flow Tracker
+ *
+ * Features:
+ *  - LK Optical Flow (iterative, image pyramid, 3 levels, scale 0.5x)
+ *  - 11x11 tracking window (half=5), 3 iterations per pyramid level
+ *  - Gyroscope assist via deviceorientation
+ *  - Shi-Tomasi quality score (min eigenvalue of gradient matrix)
+ *  - Adaptive template refresh only when quality is high
+ *  - Working resolution: 160x120 grayscale
+ *  - Pure JS TypedArrays, no external libraries
+ */
 
 const Anchor = (() => {
-  let videoEl = null;
-  let trackCanvas = null;
-  let trackCtx = null;
-  let frameGray = null;  // full-frame grayscale cache
-  let frameW = 0, frameH = 0;
-  let gyroReady = false;
-  let lastAlpha = null, lastBeta = null, lastGamma = null;
-  let gyroDx = 0, gyroDy = 0;
+  // ── Constants ────────────────────────────────────────────────────────────────
+  const WORK_W = 160;
+  const WORK_H = 120;
+  const PYRAMID_LEVELS = 3;
+  const PYRAMID_SCALE  = 0.5;
+  const LK_HALF        = 5;          // 11x11 window
+  const LK_ITERS       = 3;
+  const DET_THRESH     = 1e-4;
+  const CONFIDENCE_MAX = 500;        // eigenvalue clamped at this → 1.0
+  const REFRESH_THRESH = 0.6;        // min confidence to refresh template
 
-  const points = [];   // [{ vx, vy, template, tw, th, confidence, age }]
+  // ── State ─────────────────────────────────────────────────────────────────
+  let videoEl   = null;
+  let offCanvas = null;   // offscreen canvas for frame capture
+  let offCtx    = null;
 
-  const TMPL  = 20;    // template size (20x20 px)
-  const SEARCH = 30;   // search radius around last position
-  const ADAPT = 0.25;  // template adaptation rate (blend new into old)
-  const SAD_THRESH = 35; // max SAD per compared pixel to accept match
+  // Grayscale pyramids: arrays of Float32Array, index 0 = full working res
+  let prevPyramid = [];
+  let currPyramid = [];
 
+  // Point list: stored in working-res coords
+  // Each: { wx, wy, confidence, templatePyramid: [] }
+  let points = [];
+
+  // Gyro accumulators (in full-video-res pixels, converted on use)
+  let gyroDX = 0;
+  let gyroDY = 0;
+  let gyroActive = false;
+
+  // Scale factor: working-res / full-video-res
+  let scaleX = 1;
+  let scaleY = 1;
+
+  // ── Utility: bilinear sample ───────────────────────────────────────────────
+  function bilinear(gray, W, H, x, y) {
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = x0 + 1;
+    const y1 = y0 + 1;
+    const cx0 = Math.max(0, Math.min(W - 1, x0));
+    const cy0 = Math.max(0, Math.min(H - 1, y0));
+    const cx1 = Math.max(0, Math.min(W - 1, x1));
+    const cy1 = Math.max(0, Math.min(H - 1, y1));
+    const fx = x - x0;
+    const fy = y - y0;
+    return (
+      gray[cy0 * W + cx0] * (1 - fx) * (1 - fy) +
+      gray[cy0 * W + cx1] *      fx  * (1 - fy) +
+      gray[cy1 * W + cx0] * (1 - fx) *      fy  +
+      gray[cy1 * W + cx1] *      fx  *      fy
+    );
+  }
+
+  // ── Utility: clamp ────────────────────────────────────────────────────────
+  function clamp(v, lo, hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+
+  // ── Build grayscale image from ImageData into Float32Array ────────────────
+  function imageDataToGray(imageData, W, H) {
+    const gray = new Float32Array(W * H);
+    const d = imageData.data;
+    for (let i = 0; i < W * H; i++) {
+      const p = i * 4;
+      gray[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    }
+    return gray;
+  }
+
+  // ── Downsample a grayscale image by 0.5x (simple 2x2 box filter) ─────────
+  function downsample(gray, W, H) {
+    const nW = Math.max(1, Math.floor(W * PYRAMID_SCALE));
+    const nH = Math.max(1, Math.floor(H * PYRAMID_SCALE));
+    const out = new Float32Array(nW * nH);
+    for (let y = 0; y < nH; y++) {
+      for (let x = 0; x < nW; x++) {
+        const sx = x * 2;
+        const sy = y * 2;
+        const sx1 = Math.min(sx + 1, W - 1);
+        const sy1 = Math.min(sy + 1, H - 1);
+        out[y * nW + x] = (
+          gray[sy  * W + sx ] +
+          gray[sy  * W + sx1] +
+          gray[sy1 * W + sx ] +
+          gray[sy1 * W + sx1]
+        ) * 0.25;
+      }
+    }
+    return { gray: out, W: nW, H: nH };
+  }
+
+  // ── Build pyramid from base gray ──────────────────────────────────────────
+  function buildPyramid(baseGray, baseW, baseH) {
+    const pyr = [{ gray: baseGray, W: baseW, H: baseH }];
+    for (let l = 1; l < PYRAMID_LEVELS; l++) {
+      const prev = pyr[l - 1];
+      pyr.push(downsample(prev.gray, prev.W, prev.H));
+    }
+    return pyr;
+  }
+
+  // ── Capture current video frame into working-res grayscale ────────────────
+  function captureFrame() {
+    if (!videoEl || videoEl.readyState < 2) return null;
+    offCtx.drawImage(videoEl, 0, 0, WORK_W, WORK_H);
+    const imageData = offCtx.getImageData(0, 0, WORK_W, WORK_H);
+    return imageDataToGray(imageData, WORK_W, WORK_H);
+  }
+
+  // ── Shi-Tomasi: min eigenvalue of 2x2 symmetric matrix ───────────────────
+  function minEigenvalue(m00, m01, m11) {
+    // eigenvalues of [[m00,m01],[m01,m11]]
+    const trace = m00 + m11;
+    const det   = m00 * m11 - m01 * m01;
+    const disc  = Math.sqrt(Math.max(0, (trace * trace) / 4 - det));
+    return trace / 2 - disc;   // smaller eigenvalue
+  }
+
+  // ── Core LK tracker for one point at one pyramid level ───────────────────
+  /**
+   * @param {Float32Array} prevGray
+   * @param {Float32Array} currGray
+   * @param {number} W  width at this level
+   * @param {number} H  height at this level
+   * @param {number} px  point x at this level
+   * @param {number} py  point y at this level
+   * @param {number} initVX  initial velocity guess (from coarser level or gyro)
+   * @param {number} initVY
+   * @returns {{ vx, vy, quality }}
+   */
+  function trackPointAtLevel(prevGray, currGray, W, H, px, py, initVX, initVY) {
+    const half = LK_HALF;
+    let vx_acc = initVX;
+    let vy_acc = initVY;
+    let m00 = 0, m01 = 0, m11 = 0;   // will be reused from last iteration
+
+    for (let iter = 0; iter < LK_ITERS; iter++) {
+      m00 = 0; m01 = 0; m11 = 0;
+      let b0 = 0, b1 = 0;
+
+      for (let dy = -half; dy <= half; dy++) {
+        for (let dx = -half; dx <= half; dx++) {
+          const ix = clamp(Math.round(px + dx), 1, W - 2);
+          const iy = clamp(Math.round(py + dy), 1, H - 2);
+
+          const Ix = (prevGray[iy * W + (ix + 1)] - prevGray[iy * W + (ix - 1)]) * 0.5;
+          const Iy = (prevGray[(iy + 1) * W + ix] - prevGray[(iy - 1) * W + ix]) * 0.5;
+
+          const cx = px + dx + vx_acc;
+          const cy = py + dy + vy_acc;
+          const It = bilinear(currGray, W, H, cx, cy) - prevGray[iy * W + ix];
+
+          m00 += Ix * Ix;
+          m01 += Ix * Iy;
+          m11 += Iy * Iy;
+          b0  -= Ix * It;
+          b1  -= Iy * It;
+        }
+      }
+
+      const det = m00 * m11 - m01 * m01;
+      if (Math.abs(det) < DET_THRESH) break;   // low texture
+
+      const dvx = (m11 * b0 - m01 * b1) / det;
+      const dvy = (m00 * b1 - m01 * b0) / det;
+      vx_acc += dvx;
+      vy_acc += dvy;
+    }
+
+    const quality = minEigenvalue(m00, m01, m11);
+    return { vx: vx_acc, vy: vy_acc, quality };
+  }
+
+  // ── Run full pyramid LK for one point ────────────────────────────────────
+  /**
+   * @param {Array} prevPyr   Array of {gray, W, H}
+   * @param {Array} currPyr   Array of {gray, W, H}
+   * @param {number} wx  working-res x
+   * @param {number} wy  working-res y
+   * @param {number} gyroWX  gyro-predicted delta in working-res
+   * @param {number} gyroWY
+   * @returns {{ newWX, newWY, confidence }}
+   */
+  function trackPointPyramid(prevPyr, currPyr, wx, wy, gyroWX, gyroWY) {
+    const L = PYRAMID_LEVELS - 1;   // coarsest level index
+
+    // Scale point down to coarsest level
+    const levelScale = Math.pow(PYRAMID_SCALE, L);
+    let px = wx * levelScale;
+    let py = wy * levelScale;
+
+    // Initial velocity guess: gyro at coarsest level
+    let vx = gyroWX * levelScale;
+    let vy = gyroWY * levelScale;
+
+    let finalQuality = 0;
+
+    // Coarse → fine
+    for (let l = L; l >= 0; l--) {
+      const { gray: pGray, W, H } = prevPyr[l];
+      const { gray: cGray } = currPyr[l];
+
+      const lScale = Math.pow(PYRAMID_SCALE, l);
+      const plx = wx * lScale;
+      const ply = wy * lScale;
+
+      const result = trackPointAtLevel(pGray, cGray, W, H, plx, ply, vx, vy);
+      vx = result.vx;
+      vy = result.vy;
+      finalQuality = result.quality;
+
+      if (l > 0) {
+        // Propagate velocity to next (finer) level — undo scale for next iteration
+        vx /= PYRAMID_SCALE;
+        vy /= PYRAMID_SCALE;
+      }
+    }
+
+    // vx/vy are now in working-res pixels
+    const newWX = wx + vx;
+    const newWY = wy + vy;
+    const confidence = Math.min(1, Math.max(0, finalQuality / CONFIDENCE_MAX));
+
+    return { newWX, newWY, confidence };
+  }
+
+  // ── Gyroscope handling ────────────────────────────────────────────────────
+  function onDeviceOrientation(evt) {
+    // beta  = rotation around X (tilt front/back)  → vertical motion
+    // gamma = rotation around Y (tilt left/right)  → horizontal motion
+    // We accumulate small deltas (degrees → approximate pixel motion)
+    // Rough mapping: 1 degree ≈ a few pixels at typical FoV;
+    // use a gain factor tuned to 160px wide frame.
+    const GYRO_GAIN = 0.5;   // pixels per degree at working resolution
+    if (evt.gamma !== null) gyroDX += evt.gamma * GYRO_GAIN;
+    if (evt.beta  !== null) gyroDY += evt.beta  * GYRO_GAIN;
+  }
+
+  // ── Public: requestGyroPermission ─────────────────────────────────────────
+  async function requestGyroPermission() {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const state = await DeviceOrientationEvent.requestPermission();
+        if (state === 'granted') {
+          window.addEventListener('deviceorientation', onDeviceOrientation, true);
+          gyroActive = true;
+        }
+      } catch (e) {
+        console.warn('Anchor: gyro permission denied', e);
+      }
+    } else if (typeof DeviceOrientationEvent !== 'undefined') {
+      window.addEventListener('deviceorientation', onDeviceOrientation, true);
+      gyroActive = true;
+    }
+  }
+
+  // ── Public: init ──────────────────────────────────────────────────────────
   function init(video) {
     videoEl = video;
-    trackCanvas = document.createElement('canvas');
-    trackCtx = trackCanvas.getContext('2d', { willReadFrequently: true });
-    requestGyro();
-  }
 
-  /* ── Gyroscope ── */
-  function requestGyro() {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      // iOS 13+ requires permission
-      // We'll request on first manual mode tap
-    }
-    window.addEventListener('deviceorientation', onOrientation, true);
-  }
+    offCanvas = document.createElement('canvas');
+    offCanvas.width  = WORK_W;
+    offCanvas.height = WORK_H;
+    offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
 
-  function requestGyroPermission() {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      DeviceOrientationEvent.requestPermission()
-        .then(state => { if (state === 'granted') gyroReady = true; })
-        .catch(() => {});
+    // Capture initial frame to seed prevPyramid
+    const baseGray = captureFrame();
+    if (baseGray) {
+      prevPyramid = buildPyramid(baseGray, WORK_W, WORK_H);
     } else {
-      gyroReady = true;
+      prevPyramid = buildPyramid(new Float32Array(WORK_W * WORK_H), WORK_W, WORK_H);
     }
+    currPyramid = prevPyramid;
+
+    points = [];
+    gyroDX = 0;
+    gyroDY = 0;
   }
 
-  function onOrientation(e) {
-    if (!gyroReady) return;
-    const a = e.alpha, b = e.beta, g = e.gamma;
-    if (a == null || b == null || g == null) return;
-
-    if (lastAlpha !== null) {
-      // Convert rotation delta to approximate pixel shift
-      // ~5px per degree is a rough estimate for typical phone FOV
-      let da = a - lastAlpha;
-      let db = b - lastBeta;
-      let dg = g - lastGamma;
-      // Wrap alpha
-      if (da > 180) da -= 360;
-      if (da < -180) da += 360;
-
-      // Horizontal pan ≈ gamma change, vertical ≈ beta change
-      gyroDx += dg * 3.5;
-      gyroDy += db * 3.5;
-    }
-    lastAlpha = a; lastBeta = b; lastGamma = g;
-  }
-
-  /* ── Grab full-frame grayscale from video ── */
-  function captureFrame() {
-    if (!videoEl || videoEl.readyState < 2) return false;
-    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
-    if (vw === 0 || vh === 0) return false;
-
-    // Downscale for performance (half res)
-    const scale = vw > 640 ? 0.5 : 1;
-    frameW = Math.round(vw * scale);
-    frameH = Math.round(vh * scale);
-    trackCanvas.width = frameW;
-    trackCanvas.height = frameH;
-    trackCtx.drawImage(videoEl, 0, 0, frameW, frameH);
-
-    const imgData = trackCtx.getImageData(0, 0, frameW, frameH);
-    const d = imgData.data;
-    frameGray = new Uint8Array(frameW * frameH);
-    for (let i = 0, len = frameGray.length; i < len; i++) {
-      const j = i << 2;
-      frameGray[i] = (d[j] * 77 + d[j+1] * 150 + d[j+2] * 29) >> 8;
-    }
-    return true;
-  }
-
-  /* ── Extract grayscale patch from cached frame ── */
-  function extractPatch(cx, cy, size) {
-    const half = size >> 1;
-    const x0 = Math.max(0, Math.round(cx - half));
-    const y0 = Math.max(0, Math.round(cy - half));
-    const x1 = Math.min(frameW, x0 + size);
-    const y1 = Math.min(frameH, y0 + size);
-    const pw = x1 - x0, ph = y1 - y0;
-    if (pw < 4 || ph < 4) return null;
-
-    const patch = new Uint8Array(pw * ph);
-    for (let r = 0; r < ph; r++) {
-      for (let c = 0; c < pw; c++) {
-        patch[r * pw + c] = frameGray[(y0 + r) * frameW + (x0 + c)];
-      }
-    }
-    return { data: patch, w: pw, h: ph };
-  }
-
-  /* ── Place a new anchor point ── */
+  // ── Public: placePoint ────────────────────────────────────────────────────
+  /**
+   * Place a new tracking point.
+   * @param {number} vx  x in full-video-resolution coords
+   * @param {number} vy  y in full-video-resolution coords
+   */
   function placePoint(vx, vy) {
-    // Convert to tracking frame coords
-    const vw = videoEl.videoWidth || 1;
-    const vh = videoEl.videoHeight || 1;
-    const scale = vw > 640 ? 0.5 : 1;
-    const tx = vx * scale, ty = vy * scale;
+    if (!videoEl) return;
 
-    captureFrame();
-    const tmpl = extractPatch(tx, ty, TMPL);
+    // Compute scale factors
+    const vidW = videoEl.videoWidth  || 1;
+    const vidH = videoEl.videoHeight || 1;
+    scaleX = WORK_W / vidW;
+    scaleY = WORK_H / vidH;
 
-    points.push({
-      vx, vy,           // full-res video coords
-      tx, ty,           // tracking-res coords
-      template: tmpl ? tmpl.data : null,
-      tw: tmpl ? tmpl.w : 0,
-      th: tmpl ? tmpl.h : 0,
-      confidence: 1.0,
-      age: 0,
-    });
-    return points.length - 1;
+    const wx = vx * scaleX;
+    const wy = vy * scaleY;
+
+    // Build template pyramid from current frame
+    const baseGray = captureFrame();
+    const templatePyr = baseGray
+      ? buildPyramid(baseGray, WORK_W, WORK_H)
+      : buildPyramid(new Float32Array(WORK_W * WORK_H), WORK_W, WORK_H);
+
+    points.push({ wx, wy, confidence: 1, templatePyramid: templatePyr });
+
+    // Ensure prevPyramid is set
+    if (baseGray && prevPyramid.length === 0) {
+      prevPyramid = templatePyr;
+    }
   }
 
-  /* ── SAD template matching ── */
-  function matchTemplate(tmpl, tw, th, searchX, searchY, searchW, searchH) {
-    let bestSAD = Infinity, bestX = 0, bestY = 0;
-    const maxX = searchW - tw;
-    const maxY = searchH - th;
-    if (maxX < 0 || maxY < 0) return null;
-
-    // Coarse pass (step=2)
-    for (let sy = 0; sy <= maxY; sy += 2) {
-      for (let sx = 0; sx <= maxX; sx += 2) {
-        let sad = 0;
-        for (let py = 0; py < th; py += 2) {
-          const fRow = (searchY + sy + py) * frameW + searchX + sx;
-          const tRow = py * tw;
-          for (let px = 0; px < tw; px += 2) {
-            sad += Math.abs(frameGray[fRow + px] - tmpl[tRow + px]);
-          }
-          if (sad >= bestSAD) break;
-        }
-        if (sad < bestSAD) { bestSAD = sad; bestX = sx; bestY = sy; }
-      }
-    }
-
-    // Fine pass around best coarse match (step=1, ±2px)
-    const fx0 = Math.max(0, bestX - 2);
-    const fy0 = Math.max(0, bestY - 2);
-    const fx1 = Math.min(maxX, bestX + 2);
-    const fy1 = Math.min(maxY, bestY + 2);
-
-    for (let sy = fy0; sy <= fy1; sy++) {
-      for (let sx = fx0; sx <= fx1; sx++) {
-        let sad = 0;
-        for (let py = 0; py < th; py++) {
-          const fRow = (searchY + sy + py) * frameW + searchX + sx;
-          const tRow = py * tw;
-          for (let px = 0; px < tw; px++) {
-            sad += Math.abs(frameGray[fRow + px] - tmpl[tRow + px]);
-          }
-          if (sad >= bestSAD) break;
-        }
-        if (sad < bestSAD) { bestSAD = sad; bestX = sx; bestY = sy; }
-      }
-    }
-
-    const comparedPixels = (tw >> 1) * (th >> 1) || 1;
-    const sadPerPixel = bestSAD / comparedPixels;
-
-    return { x: bestX, y: bestY, sad: bestSAD, sadPP: sadPerPixel };
-  }
-
-  /* ── Update all point positions via visual tracking ── */
+  // ── Public: updateAll ─────────────────────────────────────────────────────
+  /**
+   * Capture a new frame, run LK on all points, update positions.
+   * Call this once per animation frame.
+   */
   function updateAll() {
-    if (points.length === 0) { gyroDx = 0; gyroDy = 0; return; }
-    if (!captureFrame()) { gyroDx = 0; gyroDy = 0; return; }
+    if (!videoEl || points.length === 0) return;
 
-    const vw = videoEl.videoWidth || 1;
-    const scale = vw > 640 ? 0.5 : 1;
+    // Capture current frame
+    const baseGray = captureFrame();
+    if (!baseGray) return;
 
-    for (const pt of points) {
-      if (!pt.template || pt.tw === 0) { pt.age++; continue; }
+    currPyramid = buildPyramid(baseGray, WORK_W, WORK_H);
 
-      // Apply gyro hint to search center
-      let searchCx = pt.tx + gyroDx * scale;
-      let searchCy = pt.ty + gyroDy * scale;
+    // Gyro delta in working-res pixels
+    const gyroWX = gyroDX;   // already in working-res (gain applied in handler)
+    const gyroWY = gyroDY;
 
-      const sr = SEARCH;
-      const sx = Math.max(0, Math.round(searchCx - sr));
-      const sy = Math.max(0, Math.round(searchCy - sr));
-      const sw = Math.min(frameW - sx, sr * 2 + pt.tw);
-      const sh = Math.min(frameH - sy, sr * 2 + pt.th);
+    // Reset gyro accumulators after reading
+    gyroDX = 0;
+    gyroDY = 0;
 
-      if (sw <= pt.tw || sh <= pt.th) { pt.age++; continue; }
+    for (let i = 0; i < points.length; i++) {
+      const pt = points[i];
 
-      const match = matchTemplate(pt.template, pt.tw, pt.th, sx, sy, sw, sh);
-      if (!match) { pt.age++; continue; }
+      const { newWX, newWY, confidence } = trackPointPyramid(
+        pt.templatePyramid,   // track relative to per-point template
+        currPyramid,
+        pt.wx,
+        pt.wy,
+        gyroWX,
+        gyroWY
+      );
 
-      const newTx = sx + match.x + pt.tw / 2;
-      const newTy = sy + match.y + pt.th / 2;
+      pt.wx = newWX;
+      pt.wy = newWY;
+      pt.confidence = confidence;
 
-      // Accept match if SAD is low enough
-      if (match.sadPP < SAD_THRESH) {
-        pt.tx = newTx;
-        pt.ty = newTy;
-        pt.vx = newTx / scale;
-        pt.vy = newTy / scale;
-        pt.confidence = Math.max(0, 1 - match.sadPP / SAD_THRESH);
-        pt.age++;
-
-        // Adaptive template update (blend old + new)
-        if (pt.age > 3) {
-          const newPatch = extractPatch(newTx, newTy, TMPL);
-          if (newPatch && newPatch.w === pt.tw && newPatch.h === pt.th) {
-            const tmpl = pt.template;
-            const fresh = newPatch.data;
-            for (let i = 0; i < tmpl.length; i++) {
-              tmpl[i] = Math.round(tmpl[i] * (1 - ADAPT) + fresh[i] * ADAPT);
-            }
-          }
-        }
-      } else {
-        pt.confidence = Math.max(0, pt.confidence - 0.1);
+      // Adaptive template refresh: only when quality is high
+      if (confidence >= REFRESH_THRESH) {
+        pt.templatePyramid = currPyramid;   // shared ref is fine (immutable per frame)
       }
     }
 
-    // Reset gyro accumulator
-    gyroDx = 0;
-    gyroDy = 0;
+    // Rotate pyramids for next call (currPyramid becomes prevPyramid)
+    prevPyramid = currPyramid;
   }
 
-  /* ── Get points in full video coords ── */
+  // ── Public: getPoints ─────────────────────────────────────────────────────
+  /**
+   * Returns tracked points in full-video-resolution coordinates.
+   * @returns {Array<{vx: number, vy: number, confidence: number}>}
+   */
   function getPoints() {
-    return points.map(p => ({ vx: p.vx, vy: p.vy, confidence: p.confidence }));
+    if (!videoEl) return [];
+    const vidW = videoEl.videoWidth  || 1;
+    const vidH = videoEl.videoHeight || 1;
+    const sX = WORK_W / vidW;
+    const sY = WORK_H / vidH;
+
+    return points.map(pt => ({
+      vx: pt.wx / sX,
+      vy: pt.wy / sY,
+      confidence: pt.confidence
+    }));
   }
 
+  // ── Public: clear ─────────────────────────────────────────────────────────
   function clear() {
-    points.length = 0;
-    gyroDx = 0; gyroDy = 0;
-    lastAlpha = null; lastBeta = null; lastGamma = null;
+    points = [];
   }
 
+  // ── Public: undoLast ──────────────────────────────────────────────────────
   function undoLast() {
-    if (points.length > 0) points.pop();
+    points.pop();
   }
 
-  function count() { return points.length; }
+  // ── Public: count ─────────────────────────────────────────────────────────
+  function count() {
+    return points.length;
+  }
 
-  return { init, placePoint, updateAll, getPoints, clear, undoLast, count, requestGyroPermission };
+  // ── Exports ───────────────────────────────────────────────────────────────
+  return {
+    init,
+    requestGyroPermission,
+    placePoint,
+    updateAll,
+    getPoints,
+    clear,
+    undoLast,
+    count
+  };
 })();

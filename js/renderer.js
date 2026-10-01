@@ -82,6 +82,19 @@ const Renderer = (() => {
 
     ctx.restore();
 
+    // ── Precision lock ellipse ring (after 15 frames) ──
+    if (m.age >= 15) {
+      ctx.save();
+      ctx.strokeStyle = hexRgba(color, 0.35);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath();
+      ctx.ellipse(cx + cw/2, cy + ch/2, cw/2 + 8, ch/2 + 8, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     // ── Dimension measurements (Width & Height arrows) ──
     if (m.measurement) {
       const meas = m.measurement;
@@ -93,22 +106,23 @@ const Renderer = (() => {
       // Height arrow (right of object)
       drawDimArrow(cx + cw + 14, cy, cx + cw + 14, cy + ch, `↕ ${hLabel}`, color, true);
 
-      // Distance tag (bottom-right)
+      // Distance badge bottom-left
       if (meas.distanceCm) {
         const distLabel = MeasureEngine.formatDist(meas.distanceCm);
         if (distLabel) drawTag(ctx, cx + cw - 2, cy + ch + 32, distLabel, color);
       }
-      // Volume tag (for 3D objects with depth)
+      // Volume tag
       if (meas.volumeCm3) {
         const volLabel = MeasureEngine.formatVolume(meas.volumeCm3);
-        if (volLabel) drawTag(ctx, cx + cw - 2, cy + ch + (meas.distanceCm ? 52 : 32), `📦 Vol: ${volLabel}`, color);
+        if (volLabel) drawTag(ctx, cx + cw - 2, cy + ch + (meas.distanceCm ? 52 : 32), `📦 ${volLabel}`, color);
       }
     }
 
-    // ── Object label pill ──
+    // ── Label pill with lock status ──
     const confPct = Math.round((m.measurement?.confScore || 0) * 100);
     const emoji   = m.measurement?.emoji || '📦';
-    drawLabel(cx, cy, `${emoji} ${m.label}  ${confPct}%`, color);
+    const lockTxt = m.age >= 15 ? ' 🔒' : ` ${Math.min(m.age,15)}/15`;
+    drawLabel(cx, cy, `${emoji} ${m.label}  ${confPct}%${lockTxt}`, color);
   }
 
   function strokeCorner(x, y, s, dx, dy) {
